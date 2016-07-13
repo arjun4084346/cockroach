@@ -799,7 +799,18 @@ func mvccGetInternal(
 	if allowedSafety == unsafeValue {
 		value.RawBytes = iter.unsafeValue()
 	} else {
-		value.RawBytes = iter.Value()
+		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
+	}
+	keyStr := metaKey.String()
+	if(false && qualifiedKey(keyStr)) {
+		data, err := getObject(metaKey)
+		//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
+		str := string(data)
+		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
+			value.RawBytes = data
+		} else {
+			fmt.Printf("*")
+		}
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {

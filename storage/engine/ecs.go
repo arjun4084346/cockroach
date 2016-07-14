@@ -26,6 +26,7 @@ func qualifiedKey(keyStr string) bool {
 	}
 }
 func getObject(key MVCCKey) ([]byte, error){
+
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
@@ -34,6 +35,7 @@ func getObject(key MVCCKey) ([]byte, error){
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
+	return []byte("Error"), nil
 	//fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
 	//check(err, "getObject ")
 	if(err != nil) {
@@ -67,6 +69,7 @@ func deleteObject(key MVCCKey) string {
 }
 
 func createObject(key MVCCKey, value []byte) string {
+	//return "Error"
 	if(len(value) == 0) {
 		return deleteObject(key)
 	}
@@ -89,8 +92,8 @@ func createObject(key MVCCKey, value []byte) string {
 	//fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
 	fmt.Println("\nPut Object : Key %s : ", key.String2(), value)
 	check(err, "putObject ")
-	output2, _ := getObject(key)
-	fmt.Println("ECS Value of this Put Key is ", output2)
+/*	output2, _ := getObject(key)
+	fmt.Println("ECS Value of this Put Key is ", output2)*/
 	return output.String()
 }
 

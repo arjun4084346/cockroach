@@ -248,6 +248,7 @@ func (r *RocksDB) Attrs() roachpb.Attributes {
 // The key and value byte slices may be reused safely. put takes a copy of
 // them before returning.
 func (r *RocksDB) Put(key MVCCKey, value []byte) error {
+	fmt.Println("ever called?")
 	return dbPut(r.rdb, key, value)
 }
 
@@ -272,6 +273,7 @@ func (r *RocksDB) ApplyBatchRepr(repr []byte) error {
 
 // Get returns the value for the given key.
 func (r *RocksDB) Get(key MVCCKey) ([]byte, error) {
+	fmt.Println("ever called2?")
 	return dbGet(r.rdb, key)
 }
 

@@ -29,15 +29,15 @@ func getObject(key MVCCKey) ([]byte, error){
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
-	keyStr := hex.EncodeToString([]byte(key.String()))
+	keyStr := hex.EncodeToString([]byte(key.String2()))
 	output, err := svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
-	check(err, "getObject ")
+	//fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
+	//check(err, "getObject ")
 	if(err != nil) {
-		fmt.Println()
+		//fmt.Println()
 		return []byte("Error"), err
 	} else {
 		defer output.Body.Close()
@@ -46,8 +46,8 @@ func getObject(key MVCCKey) ([]byte, error){
 			fmt.Println()
 			return nil, err
 		}
-		fmt.Printf(string(buf.Bytes()))
-		fmt.Println()
+		//fmt.Printf(string(buf.Bytes()))
+		//fmt.Println()
 		return buf.Bytes(), err
 	}
 }
@@ -56,12 +56,12 @@ func deleteObject(key MVCCKey) string {
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
-	keyStr := hex.EncodeToString([]byte(key.String()))
+	keyStr := hex.EncodeToString([]byte(key.String2()))
 	output, err := svc.DeleteObject(&s3.DeleteObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	fmt.Printf("Delete Object : Key %s\n", key.String())
+	fmt.Printf("Delete Object : Key %s\n", key.String2())
 	check(err, "deleteObject ")
 	return output.String()
 }
@@ -70,10 +70,13 @@ func createObject(key MVCCKey, value []byte) string {
 	if(len(value) == 0) {
 		return deleteObject(key)
 	}
+	/*if !key.IsValue() {
+		return ""
+	}*/
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
-	keyStr := hex.EncodeToString([]byte(key.String()))
+	keyStr := hex.EncodeToString([]byte(key.String2()))
 	output, err := svc.PutObject(&s3.PutObjectInput{
 		Body: strings.NewReader(string(value)),
 		Bucket: aws.String(BUCKET),
@@ -83,8 +86,11 @@ func createObject(key MVCCKey, value []byte) string {
 	 * need to add / before every special character in key, for now doing ECS stuff only on user tables so no
 	 * special characters are appearing in key.
 	 */
-	fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
+	//fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
+	fmt.Println("\nPut Object : Key %s : ", key.String2(), value)
 	check(err, "putObject ")
+	output2, _ := getObject(key)
+	fmt.Println("ECS Value of this Put Key is ", output2)
 	return output.String()
 }
 

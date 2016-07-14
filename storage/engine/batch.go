@@ -200,6 +200,7 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 		} else {
 			fmt.Printf("~")
 		}
+		fmt.Println("Rocks Value of this Put Key is ", value)
 	}
 
 	copy(b.repr[pos+n:], value)

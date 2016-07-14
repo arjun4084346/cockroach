@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
+	"strings"
 )
 
 const (
@@ -142,6 +143,15 @@ func (k MVCCKey) EncodedSize() int {
 
 // String returns a string-formatted version of the key.
 func (k MVCCKey) String() string {
+	if !k.IsValue() {
+		return k.Key.String()
+	}
+	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp)
+}
+
+// My custom String return to differentiate a few things.
+// - Arjun
+func (k MVCCKey) String2() string {
 	if !k.IsValue() {
 		return k.Key.String()
 	}
@@ -801,14 +811,29 @@ func mvccGetInternal(
 		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
 	}
 	keyStr := metaKey.String()
-	if(false && qualifiedKey(keyStr)) {
+	if(strings.Compare(keyStr, "/Table/2/1/0/\"b10\"/3/1") == 0) {
+		fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
+	}
+	if(qualifiedKey(keyStr)) {
 		data, err := getObject(metaKey)
-		//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
+
 		str := string(data)
+		if(strings.Compare(keyStr, "/Table/2/1/0/\"b10\"/3/1") == 0) {
+			//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
+			fmt.Println("ECS Value of this Get Key is ", data)
+		}
 		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 			value.RawBytes = data
 		} else {
 			fmt.Printf("*")
+			output := createObject(metaKey, value.RawBytes)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
+			// data still found on cockroachDB. TRY ONCE
+			str := output
+			if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
+
+			} else {
+				fmt.Printf("~")
+			}
 		}
 	}
 	value.Timestamp = unsafeKey.Timestamp

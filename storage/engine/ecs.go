@@ -35,7 +35,7 @@ func getObject(key MVCCKey) ([]byte, error){
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	return []byte("Error"), nil
+	//return []byte("Error"), nil
 	//fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
 	//check(err, "getObject ")
 	if(err != nil) {
@@ -45,7 +45,7 @@ func getObject(key MVCCKey) ([]byte, error){
 		defer output.Body.Close()
 		buf := bytes.NewBuffer(nil)
 		if _, err := io.Copy(buf, output.Body); err != nil {
-			fmt.Println()
+			//fmt.Println()
 			return nil, err
 		}
 		//fmt.Printf(string(buf.Bytes()))
@@ -59,12 +59,12 @@ func deleteObject(key MVCCKey) string {
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
 	keyStr := hex.EncodeToString([]byte(key.String2()))
-	output, err := svc.DeleteObject(&s3.DeleteObjectInput{
+	output, _ := svc.DeleteObject(&s3.DeleteObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	fmt.Printf("Delete Object : Key %s\n", key.String2())
-	check(err, "deleteObject ")
+	//fmt.Printf("Delete Object : Key %s\n", key.String2())
+	//check(err, "deleteObject ")
 	return output.String()
 }
 
@@ -80,7 +80,7 @@ func createObject(key MVCCKey, value []byte) string {
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
 	keyStr := hex.EncodeToString([]byte(key.String2()))
-	output, err := svc.PutObject(&s3.PutObjectInput{
+	output, _ := svc.PutObject(&s3.PutObjectInput{
 		Body: strings.NewReader(string(value)),
 		Bucket: aws.String(BUCKET),
 		Key: aws.String(keyStr),
@@ -90,8 +90,8 @@ func createObject(key MVCCKey, value []byte) string {
 	 * special characters are appearing in key.
 	 */
 	//fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
-	fmt.Println("\nPut Object : Key %s : ", key.String2(), value)
-	check(err, "putObject ")
+	//fmt.Println("\nPut Object : Key %s : ", key.String2(), value)
+	//check(err, "putObject ")
 /*	output2, _ := getObject(key)
 	fmt.Println("ECS Value of this Put Key is ", output2)*/
 	return output.String()

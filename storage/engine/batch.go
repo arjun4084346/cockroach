@@ -18,8 +18,7 @@ package engine
 
 import (
 	"github.com/cockroachdb/cockroach/util/hlc"
-	"strings"
-	"fmt"
+
 )
 
 const (
@@ -189,18 +188,15 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	b.repr = b.repr[:len(b.repr)-(maxVarintLen32-n)]
 
 	if(qualifiedKey(key.String())) {
-		//fmt.Printf("in batch.go:176 : encodeKeyValue()\n")
-		//fmt.Printf("key=%q\n", key)
-		//fmt.Printf("value=%q\n-------\n", value)
-		output := createObject(key, value)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
+		_ = createObject(key, value)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
 		// data still found on cockroachDB. TRY ONCE
-		str := output
+		/*str := output
 		if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 
 		} else {
-			fmt.Printf("~")
-		}
-		fmt.Println("Rocks Value of this Put Key %s is ", key.String(), value)
+			//fmt.Printf("~")
+		}*/
+		//fmt.Println("Rocks Value of this Put Key %s is ", key.String(), value)
 	}
 
 	copy(b.repr[pos+n:], value)

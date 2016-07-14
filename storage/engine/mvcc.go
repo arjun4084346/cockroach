@@ -37,6 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
 	//"strings"
+	"strings"
 )
 
 const (
@@ -817,9 +818,9 @@ func mvccGetInternal(
 		fmt.Println("Note that seekKey is %s, iter.key() is ", seekKey)
 	}*/
 	if(qualifiedKey(keyStr)) {
-		_, _ = getObject(seekKey)
-		/*str := string(data)
-		if(strings.Contains(keyStr, "/Table/2/1/0/\"b21\"/3/1")) {
+		data, err := getObject(seekKey)
+		str := string(data)
+		/*if(strings.Contains(keyStr, "/Table/2/1/0/\"b21\"/3/1")) {
 			//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
 			fmt.Println("Seek key is ", seekKey.String())
 			fmt.Println("Meta key is ", metaKey.String())
@@ -827,19 +828,19 @@ func mvccGetInternal(
 			fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
 			fmt.Println("ECS Value of this Get Key is ", data)
 		}*/
-		/*if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
+		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 			value.RawBytes = data
 		} else {
-			fmt.Println("* ", seekKey.String())
-			*//*output := createObject(seekKey, value.RawBytes)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
+			//fmt.Println("* ", seekKey.String())
+			_ = createObject(seekKey, value.RawBytes)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
 			// data still found on cockroachDB. TRY ONCE
-			str := output
+			/*str := output
 			if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 
 			} else {
 				fmt.Printf("~")
-			}*//*
-		}*/
+			}*/
+		}
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {

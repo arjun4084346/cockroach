@@ -70,7 +70,7 @@ type Iterator interface {
 	// unsafeKey returns the same value as Key, but the memory is invalidated on
 	// the next call to {Next,Prev,Seek,SeekReverse,Close}.
 	unsafeKey() MVCCKey
-	// unsafeKey returns the same value as Value, but the memory is invalidated
+	// unsafeValue returns the same value as Value, but the memory is invalidated
 	// on the next call to {Next,Prev,Seek,SeekReverse,Close}.
 	unsafeValue() []byte
 	// Less returns true if the key the iterator is currently positioned at is

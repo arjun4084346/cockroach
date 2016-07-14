@@ -811,16 +811,18 @@ func mvccGetInternal(
 		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
 	}
 	keyStr := metaKey.String()
-	if(strings.Compare(keyStr, "/Table/2/1/0/\"b10\"/3/1") == 0) {
+	if(strings.Compare(keyStr, "/Table/2/1/0/\"b12\"/3/1") == 0) {
 		fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
+		fmt.Println("Note that seekKey is %s, iter.key() is %s", seekKey, iter.Key())
 	}
 	if(qualifiedKey(keyStr)) {
 		data, err := getObject(metaKey)
 
 		str := string(data)
-		if(strings.Compare(keyStr, "/Table/2/1/0/\"b10\"/3/1") == 0) {
+		if(strings.Compare(keyStr, "/Table/2/1/0/\"b12\"/3/1") == 0) {
 			//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
 			fmt.Println("ECS Value of this Get Key is ", data)
+			fmt.Println("Note that seekKey is %s, iter.key() is %s", seekKey, iter.Key())
 		}
 		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 			value.RawBytes = data

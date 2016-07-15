@@ -38,6 +38,8 @@ import (
 	"github.com/cockroachdb/cockroach/util/protoutil"
 	//"strings"
 	"strings"
+	//"os"
+	"os"
 )
 
 const (
@@ -828,17 +830,22 @@ func mvccGetInternal(
 			fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
 			fmt.Println("ECS Value of this Get Key is ", data)
 		}*/
+		f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
+		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n")// + iter.Key().String() + "\n\n")
+		defer f.Close()
+		f.Sync()
+
 		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 			value.RawBytes = data
 		} else {
-			//fmt.Println("* ", seekKey.String())
-			_ = createObject(seekKey, value.RawBytes)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
-			// data still found on cockroachDB. TRY ONCE
-			/*str := output
+			fmt.Printf("* Key %s not found in ECS, though value in Rocks is ", seekKey.String())
+			fmt.Println(string(value.RawBytes))
+			//fmt.Println(string(value.RawBytes))
+			/*str = createObject(seekKey, value.RawBytes)
 			if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 
 			} else {
-				fmt.Printf("~")
+				fmt.Println("# ", seekKey.String())
 			}*/
 		}
 	}

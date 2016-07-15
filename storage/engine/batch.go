@@ -19,6 +19,10 @@ package engine
 import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 
+	"strings"
+	"fmt"
+	//"os"
+	"os"
 )
 
 const (
@@ -188,15 +192,25 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	b.repr = b.repr[:len(b.repr)-(maxVarintLen32-n)]
 
 	if(qualifiedKey(key.String())) {
-		_ = createObject(key, value)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
+		str := createObject(key, value)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
 		// data still found on cockroachDB. TRY ONCE
-		/*str := output
 		if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 
 		} else {
-			//fmt.Printf("~")
-		}*/
+			fmt.Println("~ ", key.String())
+		}
+		f, _ := os.OpenFile("/tmp/log", os.O_APPEND|os.O_WRONLY, 0600)
+		_, _ = f.WriteString(key.String() + " : " + string(value) + "\n")
+		defer f.Close()
+		f.Sync()
+
 		//fmt.Println("Rocks Value of this Put Key %s is ", key.String(), value)
+		/*if((strings.Compare(key.Key.String(), "/Table/2/1/0/\"bank7\"/3/1") == 0) ||
+			(strings.Compare(key.Key.String(), "/Table/2/1/0/\"account7\"/3/1") == 0) ||
+			(strings.Compare(key.Key.String(), "/Table/3/1/86/2/1") == 0)) {*/
+			//fmt.Printf("inserting/deleting - %s, value - ", key.String())
+			//fmt.Println(string(value))
+		//}
 	}
 
 	copy(b.repr[pos+n:], value)

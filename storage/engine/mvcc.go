@@ -36,10 +36,9 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
-	//"strings"
-	"strings"
-	//"os"
+
 	"os"
+	"strings"
 )
 
 const (
@@ -819,22 +818,9 @@ func mvccGetInternal(
 		//fmt.Println("Note that seekKey is %s, iter.key() is %s", seekKey, iter.Key())
 		fmt.Println("Note that seekKey is %s, iter.key() is ", seekKey)
 	}*/
-	if(qualifiedKey(keyStr)) {
+	if(false && qualifiedKey(keyStr)) {
 		data, err := getObject(seekKey)
 		str := string(data)
-		/*if(strings.Contains(keyStr, "/Table/2/1/0/\"b21\"/3/1")) {
-			//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
-			fmt.Println("Seek key is ", seekKey.String())
-			fmt.Println("Meta key is ", metaKey.String())
-			fmt.Println("Current key is ", iter.Key().String())
-			fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
-			fmt.Println("ECS Value of this Get Key is ", data)
-		}*/
-		f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
-		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n")// + iter.Key().String() + "\n\n")
-		defer f.Close()
-		f.Sync()
-
 		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
 			value.RawBytes = data
 		} else {
@@ -847,7 +833,19 @@ func mvccGetInternal(
 			} else {
 				fmt.Println("# ", seekKey.String())
 			}*/
+			/*if(strings.Contains(keyStr, "/Table/2/1/0/\"b21\"/3/1")) {
+			//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
+			fmt.Println("Seek key is ", seekKey.String())
+			fmt.Println("Meta key is ", metaKey.String())
+			fmt.Println("Current key is ", iter.Key().String())
+			fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
+			fmt.Println("ECS Value of this Get Key is ", data)
+		}*/
 		}
+		f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
+		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n" + iter.Key().String() + "\n\n")
+		defer f.Close()
+		f.Sync()
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {

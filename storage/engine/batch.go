@@ -19,10 +19,10 @@ package engine
 import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 
+
+	"os"
 	"strings"
 	"fmt"
-	//"os"
-	"os"
 )
 
 const (
@@ -191,7 +191,7 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	n := putUvarint32(b.repr[pos:], l)
 	b.repr = b.repr[:len(b.repr)-(maxVarintLen32-n)]
 
-	if(qualifiedKey(key.String())) {
+	if(false && qualifiedKey(key.String())) {
 		str := createObject(key, value)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
 		// data still found on cockroachDB. TRY ONCE
 		if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {

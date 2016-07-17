@@ -19,10 +19,6 @@ package engine
 import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 
-
-	"os"
-	"strings"
-	"fmt"
 )
 
 const (
@@ -191,26 +187,18 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	n := putUvarint32(b.repr[pos:], l)
 	b.repr = b.repr[:len(b.repr)-(maxVarintLen32-n)]
 
-	if(false && qualifiedKey(key.String())) {
-		str := createObject(key, value)		//data is being stored before this step. proof : when createObject fails with panic (i.e. program stops),
-		// data still found on cockroachDB. TRY ONCE
-		if(!strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
+	if(qualifiedKey(key.String())) {
+		_ = createObject(key, value)
 
+		/*f, _ := os.OpenFile("/tmp/log", os.O_APPEND|os.O_WRONLY, 0600)
+		_, _ = f.WriteString(key.String() + " : ")
+		if(len(value) == 0) {
+			_, _ = f.WriteString("NULL\n")
 		} else {
-			fmt.Println("~ ", key.String())
-		}
-		f, _ := os.OpenFile("/tmp/log", os.O_APPEND|os.O_WRONLY, 0600)
-		_, _ = f.WriteString(key.String() + " : " + string(value) + "\n")
-		defer f.Close()
-		f.Sync()
-
-		//fmt.Println("Rocks Value of this Put Key %s is ", key.String(), value)
-		/*if((strings.Compare(key.Key.String(), "/Table/2/1/0/\"bank7\"/3/1") == 0) ||
-			(strings.Compare(key.Key.String(), "/Table/2/1/0/\"account7\"/3/1") == 0) ||
-			(strings.Compare(key.Key.String(), "/Table/3/1/86/2/1") == 0)) {*/
-			//fmt.Printf("inserting/deleting - %s, value - ", key.String())
-			//fmt.Println(string(value))
-		//}
+			_, _ = f.WriteString("something\n")
+			defer f.Close()
+			f.Sync()
+		}*/
 	}
 
 	copy(b.repr[pos+n:], value)

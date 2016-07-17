@@ -1,4 +1,4 @@
-./cockroach quit
+#./cockroach quit
 killall -9 cockroach
 rm -rf cockroach
 make build

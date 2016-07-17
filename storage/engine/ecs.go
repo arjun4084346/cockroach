@@ -13,6 +13,8 @@ import (
 
 const BUCKET string = "b1"
 const ENDPOINT string = "http://10.247.78.204:9020"
+var i int
+var KV_MAP = map[string][]byte{}
 
 func qualifiedKey(keyStr string) bool {
 	//return false		//COMMENT THIS LINE TO EXECUTE CHANGES
@@ -26,11 +28,19 @@ func qualifiedKey(keyStr string) bool {
 	}
 }
 func getObject(key MVCCKey) ([]byte, error){
+	keyStr := hex.EncodeToString([]byte(key.String()))
+
+	data, present := KV_MAP[keyStr]
+	if(present) {
+		return data, nil
+	} //else {
+		//return getObjectInternal(keyStr)
+	//}
 
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
-	keyStr := hex.EncodeToString([]byte(key.String2()))
+
 	output, err := svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
@@ -38,6 +48,7 @@ func getObject(key MVCCKey) ([]byte, error){
 	//return []byte("Error"), nil
 	//fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
 	//check(err, "getObject ")
+
 	if(err != nil) {
 		//fmt.Println()
 		return []byte("Error"), err
@@ -45,12 +56,11 @@ func getObject(key MVCCKey) ([]byte, error){
 		defer output.Body.Close()
 		buf := bytes.NewBuffer(nil)
 		if _, err := io.Copy(buf, output.Body); err != nil {
-			//fmt.Println()
 			return nil, err
 		}
-		//fmt.Printf(string(buf.Bytes()))
-		//fmt.Println()
-		return buf.Bytes(), err
+		value := buf.Bytes()
+		KV_MAP[keyStr] = value
+		return value, err
 	}
 }
 
@@ -65,30 +75,33 @@ func deleteObject(key MVCCKey) string {
 	})
 	//fmt.Printf("Delete Object : Key %s\n", key.String2())
 	//check(err, "deleteObject ")
+	delete(KV_MAP, keyStr)
 	return output.String()
 }
 
 func createObject(key MVCCKey, value []byte) string {
 	//return "Error"
+	keyStr := hex.EncodeToString([]byte(key.String()))
+
+
+	//return "Success"
+	//fmt.Print(".")
 	if(len(value) == 0) {
 		return deleteObject(key)
 	}
+	KV_MAP[keyStr] = value
 	/*if !key.IsValue() {
 		return ""
 	}*/
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 
-	keyStr := hex.EncodeToString([]byte(key.String2()))
+
 	output, _ := svc.PutObject(&s3.PutObjectInput{
 		Body: strings.NewReader(string(value)),
 		Bucket: aws.String(BUCKET),
 		Key: aws.String(keyStr),
 	})
-	/*
-	 * need to add / before every special character in key, for now doing ECS stuff only on user tables so no
-	 * special characters are appearing in key.
-	 */
 	//fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
 	//fmt.Println("\nPut Object : Key %s : ", key.String2(), value)
 	//check(err, "putObject ")
@@ -100,6 +113,6 @@ func createObject(key MVCCKey, value []byte) string {
 func check(e error, msg string) {
 	if e != nil {
 		fmt.Println("panic " + msg + e.Error())
-		//panic(e)
+		panic(e)
 	}
 }

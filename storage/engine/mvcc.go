@@ -818,10 +818,10 @@ func mvccGetInternal(
 		fmt.Println("Note that seekKey is %s, iter.key() is ", seekKey)
 	}*/
 	if(qualifiedKey(keyStr)) {
-		_, err := getObject(unsafeKey)
+		data, err := getObject(unsafeKey)
 		//str := string(data)
 		if(err == nil) {//|| !strings.Contains(str, "Error") || !strings.Contains(str, "ERROR")) {
-			//value.RawBytes = data
+			value.RawBytes = data
 		} else {
 			//fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
 			_ = createObject(unsafeKey, value.RawBytes)

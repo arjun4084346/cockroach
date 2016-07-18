@@ -13,11 +13,9 @@ import (
 
 const BUCKET string = "b1"
 const ENDPOINT string = "http://10.247.78.204:9020"
-var i int
 var KV_MAP = map[string][]byte{}
 
 func qualifiedKey(keyStr string) bool {
-	//return false		//COMMENT THIS LINE TO EXECUTE CHANGES
 	if(!(strings.Contains(keyStr, "/Table/11") || strings.Contains(keyStr, "/Table/14")  ||			//lease && ui
 	strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
 	//!strings.Contains(keyStr, "/Table/3/1") || !strings.Contains(keyStr, "/Table/2/1") ||	//descriptor && namespace
@@ -27,35 +25,27 @@ func qualifiedKey(keyStr string) bool {
 		return false
 	}
 }
+
 func getObject(key MVCCKey) ([]byte, error){
 	keyStr := hex.EncodeToString([]byte(key.String()))
-
 	data, present := KV_MAP[keyStr]
 	if(present) {
 		return data, nil
-	} //else {
-		//return getObjectInternal(keyStr)
-	//}
-
+	}
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-
-
 	output, err := svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	//return []byte("Error"), nil
-	//fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
-	//check(err, "getObject ")
-
 	if(err != nil) {
-		//fmt.Println()
+		fmt.Println("Error : Object not found!!")
 		return []byte("Error"), err
 	} else {
 		defer output.Body.Close()
 		buf := bytes.NewBuffer(nil)
 		if _, err := io.Copy(buf, output.Body); err != nil {
+			fmt.Println("Error : Object parsing failed!!")
 			return nil, err
 		}
 		value := buf.Bytes()
@@ -65,48 +55,38 @@ func getObject(key MVCCKey) ([]byte, error){
 }
 
 func deleteObject(key MVCCKey) string {
+	keyStr := hex.EncodeToString([]byte(key.String()))
+	delete(KV_MAP, keyStr)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-
-	keyStr := hex.EncodeToString([]byte(key.String2()))
-	output, _ := svc.DeleteObject(&s3.DeleteObjectInput{
+	output, err := svc.DeleteObject(&s3.DeleteObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	//fmt.Printf("Delete Object : Key %s\n", key.String2())
-	//check(err, "deleteObject ")
-	delete(KV_MAP, keyStr)
+	if(err != nil) {
+		fmt.Println("Error : Object deletion failed!! " + output.String())
+		return "Error"
+	}
 	return output.String()
 }
 
 func createObject(key MVCCKey, value []byte) string {
-	//return "Error"
 	keyStr := hex.EncodeToString([]byte(key.String()))
-
-
-	//return "Success"
-	//fmt.Print(".")
 	if(len(value) == 0) {
 		return deleteObject(key)
 	}
-	KV_MAP[keyStr] = value
-	/*if !key.IsValue() {
-		return ""
-	}*/
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-
-
-	output, _ := svc.PutObject(&s3.PutObjectInput{
+	output, err := svc.PutObject(&s3.PutObjectInput{
 		Body: strings.NewReader(string(value)),
 		Bucket: aws.String(BUCKET),
 		Key: aws.String(keyStr),
 	})
-	//fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
-	//fmt.Println("\nPut Object : Key %s : ", key.String2(), value)
-	//check(err, "putObject ")
-/*	output2, _ := getObject(key)
-	fmt.Println("ECS Value of this Put Key is ", output2)*/
+	if(err != nil) {
+		fmt.Println("Error : Object insertion failed!! " + output.String())
+		return "Error"
+	}
+	KV_MAP[keyStr] = value
 	return output.String()
 }
 

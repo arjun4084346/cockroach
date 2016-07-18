@@ -18,7 +18,6 @@ package engine
 
 import (
 	"github.com/cockroachdb/cockroach/util/hlc"
-
 )
 
 const (

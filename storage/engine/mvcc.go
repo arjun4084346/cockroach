@@ -24,7 +24,6 @@ import (
 	"sync"
 
 	"golang.org/x/net/context"
-
 	"github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
@@ -144,15 +143,6 @@ func (k MVCCKey) EncodedSize() int {
 
 // String returns a string-formatted version of the key.
 func (k MVCCKey) String() string {
-	if !k.IsValue() {
-		return k.Key.String()
-	}
-	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp)
-}
-
-// My custom String return to differentiate a few things.
-// - Arjun
-func (k MVCCKey) String2() string {
 	if !k.IsValue() {
 		return k.Key.String()
 	}
@@ -812,18 +802,12 @@ func mvccGetInternal(
 		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
 	}
 	keyStr := metaKey.String()
-	/*if(strings.Compare(keyStr, "/Table/2/1/0/\"b12\"/3/1") == 0) {
-		fmt.Println("Rocks Value of this Get Key is ", value.RawBytes)
-		//fmt.Println("Note that seekKey is %s, iter.key() is %s", seekKey, iter.Key())
-		fmt.Println("Note that seekKey is %s, iter.key() is ", seekKey)
-	}*/
 	if(qualifiedKey(keyStr)) {
 		data, err := getObject(unsafeKey)
-		//str := string(data)
-		if(err == nil) {//|| !strings.Contains(str, "Error") || !strings.Contains(str, "ERROR")) {
+		if(err == nil) {
 			value.RawBytes = data
 		} else {
-			//fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
+			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
 			_ = createObject(unsafeKey, value.RawBytes)
 		}
 		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)

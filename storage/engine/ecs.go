@@ -13,9 +13,9 @@ import (
 
 const BUCKET string = "b1"
 const ENDPOINT string = "http://10.247.78.204:9020"
+var KV_MAP = map[string][]byte{}
 
 func qualifiedKey(keyStr string) bool {
-	//return false		//COMMENT THIS LINE TO EXECUTE CHANGES
 	if(!(strings.Contains(keyStr, "/Table/11") || strings.Contains(keyStr, "/Table/14")  ||			//lease && ui
 	strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
 	//!strings.Contains(keyStr, "/Table/3/1") || !strings.Contains(keyStr, "/Table/2/1") ||	//descriptor && namespace
@@ -25,66 +25,66 @@ func qualifiedKey(keyStr string) bool {
 		return false
 	}
 }
+
 func getObject(key MVCCKey) ([]byte, error){
+	keyStr := hex.EncodeToString([]byte(key.String()))
+	data, present := KV_MAP[keyStr]
+	if(present) {
+		return data, nil
+	}
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-
-	keyStr := hex.EncodeToString([]byte(key.String()))
 	output, err := svc.GetObject(&s3.GetObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	fmt.Printf("Got Object : Key %s : %s : Value ", key.String(), keyStr)
-	check(err, "getObject ")
 	if(err != nil) {
-		fmt.Println()
 		return []byte("Error"), err
 	} else {
 		defer output.Body.Close()
 		buf := bytes.NewBuffer(nil)
 		if _, err := io.Copy(buf, output.Body); err != nil {
-			fmt.Println()
+			fmt.Println("Error : Object parsing failed!!")
 			return nil, err
 		}
-		fmt.Printf(string(buf.Bytes()))
-		fmt.Println()
-		return buf.Bytes(), err
+		value := buf.Bytes()
+		KV_MAP[keyStr] = value
+		return value, err
 	}
 }
 
 func deleteObject(key MVCCKey) string {
+	keyStr := hex.EncodeToString([]byte(key.String()))
+	delete(KV_MAP, keyStr)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-
-	keyStr := hex.EncodeToString([]byte(key.String()))
 	output, err := svc.DeleteObject(&s3.DeleteObjectInput{
 		Bucket: aws.String(BUCKET),
 		Key:    aws.String(keyStr),
 	})
-	fmt.Printf("Delete Object : Key %s\n", key.String())
-	check(err, "deleteObject ")
+	if(err != nil) {
+		return "Error"
+	}
 	return output.String()
 }
 
 func createObject(key MVCCKey, value []byte) string {
-	if(len(value) == 0) {
+	keyStr := hex.EncodeToString([]byte(key.String()))
+	if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
+													// need to check the difference
 		return deleteObject(key)
 	}
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-
-	keyStr := hex.EncodeToString([]byte(key.String()))
 	output, err := svc.PutObject(&s3.PutObjectInput{
 		Body: strings.NewReader(string(value)),
 		Bucket: aws.String(BUCKET),
 		Key: aws.String(keyStr),
 	})
-	/*
-	 * need to add / before every special character in key, for now doing ECS stuff only on user tables so no
-	 * special characters are appearing in key.
-	 */
-	fmt.Printf("Put Object : Key %s : %s : Value %s\n", key.String(), keyStr, string(value))
-	check(err, "putObject ")
+	if(err != nil) {
+		return "Error"
+	}
+	KV_MAP[keyStr] = value
 	return output.String()
 }
 

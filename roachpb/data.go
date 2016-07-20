@@ -248,8 +248,8 @@ func (v Value) Verify(key []byte) error {
 	}
 	if sum := v.checksum(); sum != 0 {
 		if computedSum := v.computeChecksum(key); computedSum != sum {
-			return fmt.Errorf("%s: invalid checksum (%x) value [% x]",
-				Key(key), computedSum, v.RawBytes)
+			return fmt.Errorf("%s: invalid checksum (%x) value [%s]",
+				Key(key), computedSum, string(v.RawBytes))
 		}
 	}
 	return nil

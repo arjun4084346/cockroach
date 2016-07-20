@@ -24,7 +24,6 @@ import (
 	"sync"
 	"strings"
 	"golang.org/x/net/context"
-
 	"github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
@@ -36,6 +35,8 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
+
+
 )
 
 const (
@@ -802,15 +803,19 @@ func mvccGetInternal(
 		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
 	}
 	keyStr := metaKey.String()
-	if(false && qualifiedKey(keyStr)) {
-		data, err := getObject(metaKey)
-		//fmt.Printf("metakey %q, CHANGING...", metaKey, value.RawBytes)
-		str := string(data)
-		if(err == nil && !strings.Contains(str, "Error") && !strings.Contains(str, "ERROR")) {
+	if(qualifiedKey(keyStr)) {
+		data, err := getObject(unsafeKey)
+		if(err == nil) {
 			value.RawBytes = data
 		} else {
-			fmt.Printf("*")
+			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
+			_ = createObject(unsafeKey, value.RawBytes)
 		}
+		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
+		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n" + unsafeKey.String() + "\n\n")
+		//_, _ = f.WriteString(iter.Key().String() + "\n" + unsafeKey.String() + "\n\n")
+		defer f.Close()
+		f.Sync()*/
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {

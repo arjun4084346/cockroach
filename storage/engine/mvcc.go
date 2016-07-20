@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"math"
 	"sync"
-	"strings"
 	"golang.org/x/net/context"
 	"github.com/dustin/go-humanize"
 	"github.com/gogo/protobuf/proto"

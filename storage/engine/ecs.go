@@ -39,7 +39,6 @@ func getObject(key MVCCKey) ([]byte, error){
 		Key:    aws.String(keyStr),
 	})
 	if(err != nil) {
-		fmt.Println("Error : Object not found!!")
 		return []byte("Error"), err
 	} else {
 		defer output.Body.Close()
@@ -64,7 +63,6 @@ func deleteObject(key MVCCKey) string {
 		Key:    aws.String(keyStr),
 	})
 	if(err != nil) {
-		fmt.Println("Error : Object deletion failed!! " + output.String())
 		return "Error"
 	}
 	return output.String()
@@ -72,7 +70,8 @@ func deleteObject(key MVCCKey) string {
 
 func createObject(key MVCCKey, value []byte) string {
 	keyStr := hex.EncodeToString([]byte(key.String()))
-	if(len(value) == 0) {
+	if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
+													// need to check the difference
 		return deleteObject(key)
 	}
 	sess := session.New()
@@ -83,7 +82,6 @@ func createObject(key MVCCKey, value []byte) string {
 		Key: aws.String(keyStr),
 	})
 	if(err != nil) {
-		fmt.Println("Error : Object insertion failed!! " + output.String())
 		return "Error"
 	}
 	KV_MAP[keyStr] = value

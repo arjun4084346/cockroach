@@ -199,8 +199,7 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 			f.Sync()
 		}*/
 	}
-
-	copy(b.repr[pos+n:], value)
+	copy(b.repr[pos + n:], value)
 }
 
 func (b *rocksDBBatchBuilder) Put(key MVCCKey, value []byte) {

@@ -29,6 +29,7 @@ import (
 	"sort"
 	"sync"
 	"unsafe"
+	"container/list"
 
 	"github.com/dustin/go-humanize"
 	"github.com/elastic/gosigar"
@@ -43,6 +44,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/stop"
+
 )
 
 // #cgo darwin LDFLAGS: -Wl,-undefined -Wl,dynamic_lookup
@@ -946,12 +948,16 @@ func (r *rocksDBBatch) flushMutations() {
 }
 
 type rocksDBIterator struct {
-	engine Reader
-	iter   *C.DBIterator
-	valid  bool
-	reseek bool
-	key    C.DBKey
-	value  C.DBSlice
+	engine 		Reader
+	iter   		*C.DBIterator
+	valid  		bool
+	reseek 		bool
+	key    		C.DBKey
+	value  		C.DBSlice
+	keyList   list.List
+	curr   		int
+	ECSKey		MVCCKey
+	ECSValue	[]byte
 }
 
 // TODO(peter): Is this pool useful now that rocksDBBatch.NewIterator doesn't
@@ -973,6 +979,7 @@ func newRocksDBIterator(rdb *C.DBEngine, prefix bool, engine Reader) Iterator {
 	// as well.
 	r := iterPool.Get().(*rocksDBIterator)
 	r.init(rdb, prefix, engine)
+
 	return r
 }
 
@@ -999,6 +1006,9 @@ func (r *rocksDBIterator) Close() {
 }
 
 func (r *rocksDBIterator) Seek(key MVCCKey) {
+	/*if(qualifiedKey(key.String())) {
+		fmt.Println("called for", key)
+	}*/
 	r.checkEngineOpen()
 	if len(key.Key) == 0 {
 		// start=Key("") needs special treatment since we need
@@ -1009,8 +1019,23 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
 			return
 		}
+
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 	}
+	/*if(qualifiedKey(key.String())) {
+		r.setECSState(ecsIterSeek(key))
+		fmt.Println("Expected Key :", r.Key())
+		fmt.Println("ECS Key :", r.getECSKey())
+		fmt.Println()
+	}*/
+}
+
+func (r *rocksDBIterator) setECSState(state ECSState) {
+	//r.valid = bool(state.valid)
+	//r.reseek = false
+	r.ECSKey = state.key
+	r.ECSValue = state.value
+
 }
 
 func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
@@ -1070,6 +1095,17 @@ func (r *rocksDBIterator) Key() MVCCKey {
 
 func (r *rocksDBIterator) Value() []byte {
 	return cSliceToGoBytes(r.value)
+}
+
+func (r *rocksDBIterator) getECSKey() MVCCKey {
+	// The data returned by rocksdb_iter_{key,value} is not meant to be
+	// freed by the client. It is a direct reference to the data managed
+	// by the iterator, so it is copied instead of freed.
+	return r.ECSKey
+}
+
+func (r *rocksDBIterator) getECSValue() []byte {
+	return r.ECSValue
 }
 
 func (r *rocksDBIterator) ValueProto(msg proto.Message) error {

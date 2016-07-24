@@ -1,4 +1,3 @@
-
 package engine
 
 import (
@@ -20,7 +19,7 @@ func qualifiedKey(keyStr string) bool {
 	if(!(strings.Contains(keyStr, "/Table/11") || strings.Contains(keyStr, "/Table/14")  ||			//lease && ui
 	strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
 	//!strings.Contains(keyStr, "/Table/3/1") || !strings.Contains(keyStr, "/Table/2/1") ||	//descriptor && namespace
-	strings.Contains(keyStr, "/Local/Range") || strings.Contains(keyStr, "Meta") || strings.Contains(keyStr, "System"))) {
+	strings.Contains(keyStr, "/Local/") || strings.Contains(keyStr, "Meta") || strings.Contains(keyStr, "System"))) {
 		return true
 	} else {
 		return false
@@ -28,7 +27,7 @@ func qualifiedKey(keyStr string) bool {
 }
 
 func getObject(key MVCCKey) ([]byte, error){
-	keyStr := hex.EncodeToString([]byte(key.String()))
+	keyStr := hex.EncodeToString([]byte(key.StringWithoutDot()))
 	data, present := KV_MAP[keyStr]
 	if(present) {
 		return data, nil
@@ -55,7 +54,7 @@ func getObject(key MVCCKey) ([]byte, error){
 }
 
 func deleteObject(key MVCCKey) string {
-	keyStr := hex.EncodeToString([]byte(key.String()))
+	keyStr := hex.EncodeToString([]byte(key.StringWithoutDot()))
 	delete(KV_MAP, keyStr)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
@@ -70,7 +69,7 @@ func deleteObject(key MVCCKey) string {
 }
 
 func createObject(key MVCCKey, value []byte) string {
-	keyStr := hex.EncodeToString([]byte(key.String()))
+	keyStr := hex.EncodeToString([]byte(key.StringWithoutDot()))
 	if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
 													// need to check the difference
 		return deleteObject(key)

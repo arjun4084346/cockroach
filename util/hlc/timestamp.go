@@ -46,6 +46,13 @@ func (t Timestamp) String() string {
 	return fmt.Sprintf("%d.%09d,%d", t.WallTime/1E9, t.WallTime%1E9, t.Logical)
 }
 
+func (t Timestamp) StringWithoutDot() string {
+	// How String() ensures that t.Walltime/1E9 is of 10 digit!!
+	// if it is shorter it can create problem in iterator operations
+	// -Arjun
+	return fmt.Sprintf("%d,%d", t.WallTime, t.Logical)
+}
+
 // Add returns a timestamp with the WallTime and Logical components increased.
 // wallTime is expressed in nanos.
 func (t Timestamp) Add(wallTime int64, logical int32) Timestamp {

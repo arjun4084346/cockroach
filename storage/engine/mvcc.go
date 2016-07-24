@@ -118,6 +118,16 @@ func (k MVCCKey) Less(l MVCCKey) bool {
 	return l.Timestamp.Less(k.Timestamp)
 }
 
+func (k MVCCKey) Lower(l MVCCKey) bool {
+	if c := k.Key.Compare(l.Key); c != 0 {
+		return c < 0
+	}
+	if !l.IsValue() {
+		return false
+	}
+	return k.Timestamp.Less(l.Timestamp)
+}
+
 // Equal returns whether two keys are identical.
 func (k MVCCKey) Equal(l MVCCKey) bool {
 	return k.Key.Compare(l.Key) == 0 && k.Timestamp == l.Timestamp
@@ -146,6 +156,13 @@ func (k MVCCKey) String() string {
 		return k.Key.String()
 	}
 	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp)
+}
+
+func (k MVCCKey) StringWithoutDot() string {
+	if !k.IsValue() {
+		return k.Key.String()
+	}
+	return fmt.Sprintf("%s/%s", k.Key.StringWithoutQuote(), k.Timestamp.StringWithoutDot())
 }
 
 // MVCCKeyValue contains the raw bytes of the value for a key.
@@ -767,6 +784,13 @@ func mvccGetInternal(
 	}
 
 	unsafeKey := iter.unsafeKey()
+	if(qualifiedKey(seekKey.String())) {
+		fmt.Println(metaKey.String())
+		fmt.Println(unsafeKey.String())
+		//fmt.Println("Key queried is", unsafeKey.String())
+		//fmt.Println(iter.(*rocksDBIterator).curr)
+		fmt.Println()
+	}
 	if !unsafeKey.Key.Equal(metaKey.Key) {
 		return nil, ignoredIntents, safeValue, nil
 	}
@@ -803,11 +827,16 @@ func mvccGetInternal(
 	}
 	keyStr := metaKey.String()
 	if(qualifiedKey(keyStr)) {
+		//fmt.Println(metaKey.String())
+		//fmt.Println(seekKey.String())
+		//fmt.Println("Key queried is", unsafeKey.String())
+		//fmt.Println(iter.(*rocksDBIterator).curr)
+		//fmt.Println()
 		data, err := getObject(unsafeKey)
 		if(err == nil) {
 			value.RawBytes = data
 		} else {
-			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
+			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.StringWithoutDot())
 			_ = createObject(unsafeKey, value.RawBytes)
 		}
 		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)

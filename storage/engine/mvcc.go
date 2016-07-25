@@ -119,7 +119,10 @@ func (k MVCCKey) Less(l MVCCKey) bool {
 }
 
 func (k MVCCKey) Lower(l MVCCKey) bool {
-	if c := k.Key.Compare(l.Key); c != 0 {
+	if c := k.Key.Compare2(l.Key); c != 0 {
+		//if(strings.Compare(l.String(), "/Table/2/1/0/\"system\"/3/1")==0) {
+			//fmt.Println()
+		//}
 		return c < 0
 	}
 	if !l.IsValue() {
@@ -131,6 +134,10 @@ func (k MVCCKey) Lower(l MVCCKey) bool {
 // Equal returns whether two keys are identical.
 func (k MVCCKey) Equal(l MVCCKey) bool {
 	return k.Key.Compare(l.Key) == 0 && k.Timestamp == l.Timestamp
+}
+
+func (k MVCCKey) myEqual(l MVCCKey) bool {
+	return k.Key.Compare2(l.Key) == 0 && k.Timestamp == l.Timestamp
 }
 
 // IsValue returns true iff the timestamp is non-zero.
@@ -158,11 +165,25 @@ func (k MVCCKey) String() string {
 	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp)
 }
 
-func (k MVCCKey) StringWithoutDot() string {
+func (k MVCCKey) StringWithoutDotWithoutQuote() string {
 	if !k.IsValue() {
 		return k.Key.String()
 	}
 	return fmt.Sprintf("%s/%s", k.Key.StringWithoutQuote(), k.Timestamp.StringWithoutDot())
+}
+
+func (k MVCCKey) StringWithoutDot() string {
+	if !k.IsValue() {
+		return k.Key.String()
+	}
+	return fmt.Sprintf("%s/%s", k.Key.String(), k.Timestamp.StringWithoutDot())
+}
+
+func (k MVCCKey) StringWithoutQuote() string {
+	if !k.IsValue() {
+		return k.Key.String()
+	}
+	return fmt.Sprintf("%s/%s", k.Key.StringWithoutQuote(), k.Timestamp.String())
 }
 
 // MVCCKeyValue contains the raw bytes of the value for a key.
@@ -776,21 +797,24 @@ func mvccGetInternal(
 	}
 
 	iter.Seek(seekKey)
-	if !iter.Valid() {
-		if err := iter.Error(); err != nil {
-			return nil, nil, safeValue, err
+
+	if(qualifiedKey(seekKey.String())) {
+		if !iter.(*rocksDBBatchIterator).ECSValid() {		//write declarations in engine.go Iterator interface --Arjun
+			if err := iter.Error(); err != nil {			//implement iter.ECSError()
+				return nil, nil, safeValue, err
+			}
+			return nil, ignoredIntents, safeValue, nil
 		}
-		return nil, ignoredIntents, safeValue, nil
+	} else {
+		if !iter.Valid() {
+			if err := iter.Error(); err != nil {
+				return nil, nil, safeValue, err
+			}
+			return nil, ignoredIntents, safeValue, nil
+		}
 	}
 
 	unsafeKey := iter.unsafeKey()
-	if(qualifiedKey(seekKey.String())) {
-		fmt.Println(metaKey.String())
-		fmt.Println(unsafeKey.String())
-		//fmt.Println("Key queried is", unsafeKey.String())
-		//fmt.Println(iter.(*rocksDBIterator).curr)
-		fmt.Println()
-	}
 	if !unsafeKey.Key.Equal(metaKey.Key) {
 		return nil, ignoredIntents, safeValue, nil
 	}

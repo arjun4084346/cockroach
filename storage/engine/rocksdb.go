@@ -958,6 +958,7 @@ type rocksDBIterator struct {
 	curr   		int
 	ECSKey		MVCCKey
 	ECSValue	[]byte
+	ECSvalid  bool
 }
 
 // TODO(peter): Is this pool useful now that rocksDBBatch.NewIterator doesn't
@@ -1006,9 +1007,6 @@ func (r *rocksDBIterator) Close() {
 }
 
 func (r *rocksDBIterator) Seek(key MVCCKey) {
-	/*if(qualifiedKey(key.String())) {
-		fmt.Println("called for", key)
-	}*/
 	r.checkEngineOpen()
 	if len(key.Key) == 0 {
 		// start=Key("") needs special treatment since we need
@@ -1019,23 +1017,14 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
 			return
 		}
-
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
+		if(qualifiedKey(key.String())) {
+			r.setECSState(ecsIterSeek(key))
+			fmt.Println("Expected Key :", r.Key())
+			fmt.Println("ECS      Key :", r.getECSKey())
+			fmt.Println()
+		}
 	}
-	/*if(qualifiedKey(key.String())) {
-		r.setECSState(ecsIterSeek(key))
-		fmt.Println("Expected Key :", r.Key())
-		fmt.Println("ECS Key :", r.getECSKey())
-		fmt.Println()
-	}*/
-}
-
-func (r *rocksDBIterator) setECSState(state ECSState) {
-	//r.valid = bool(state.valid)
-	//r.reseek = false
-	r.ECSKey = state.key
-	r.ECSValue = state.value
-
 }
 
 func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
@@ -1066,6 +1055,10 @@ func (r *rocksDBIterator) Valid() bool {
 	return r.valid
 }
 
+func (r *rocksDBIterator) ECSValid() bool {
+	return r.ECSvalid
+}
+
 func (r *rocksDBIterator) Next() {
 	r.checkEngineOpen()
 	r.setState(C.DBIterNext(r.iter, false /* !skip_current_key_versions */))
@@ -1093,15 +1086,15 @@ func (r *rocksDBIterator) Key() MVCCKey {
 	return cToGoKey(r.key)
 }
 
-func (r *rocksDBIterator) Value() []byte {
-	return cSliceToGoBytes(r.value)
-}
-
 func (r *rocksDBIterator) getECSKey() MVCCKey {
 	// The data returned by rocksdb_iter_{key,value} is not meant to be
 	// freed by the client. It is a direct reference to the data managed
 	// by the iterator, so it is copied instead of freed.
 	return r.ECSKey
+}
+
+func (r *rocksDBIterator) Value() []byte {
+	return cSliceToGoBytes(r.value)
 }
 
 func (r *rocksDBIterator) getECSValue() []byte {
@@ -1136,6 +1129,13 @@ func (r *rocksDBIterator) setState(state C.DBIterState) {
 	r.reseek = false
 	r.key = state.key
 	r.value = state.value
+}
+
+func (r *rocksDBIterator) setECSState(state ECSIterState) {
+	r.ECSvalid = state.valid
+	//r.reseek = false			//fix this. set this also, understand the significance!! -Arjun
+	r.ECSKey = state.key
+	r.ECSValue = state.value
 }
 
 func (r *rocksDBIterator) ComputeStats(start, end MVCCKey, nowNanos int64) (enginepb.MVCCStats, error) {

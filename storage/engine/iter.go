@@ -16,39 +16,32 @@ import (
 )
 
 var keyList = list.New()
-type ECSState struct {
+type ECSIterState struct {
 	key		MVCCKey;
 	value	[]byte;
+	valid	bool
 }
 
-func ecsIterSeek(SK MVCCKey) ECSState {
+func ecsIterSeek(SK MVCCKey) ECSIterState {
 	if(keyList.Len() == 0) {
 		fmt.Println("keyList is empty")
 		getList()
 	}
-	//fmt.Println(keyList.Len())
-	//fmt.Println(SAMPLE_KEY, SAMPLE_KEY_TIME, "is passed")
 	i := 0
-	fmt.Println("called for", SK)
+	fmt.Println("called 2 for  ", SK)
 	for e := keyList.Front(); e != nil; e = e.Next() {
 		key := e.Value.(MVCCKey)
-		/*fmt.Println("comparing :")
-		fmt.Println(SK)
-		fmt.Println(key)
-		fmt.Println()*/
-		if(SK.Equal(key) || SK.Lower(key)) {
-			//fmt.Println("Answer is", key)
-			return ECSState{
-				key: key,
-				value: []byte("abc"),
+		if(SK.myEqual(key) || SK.Lower(key)) {	//fix myEqual too, maybe
+			return ECSIterState{
+				key:		key,
+				value:	[]byte("abc"),
+				valid:	true,
 			}
 		}
 		i++
 	}
-	//fmt.Println("Answer is .......")
-	return ECSState{
-
-		value: []byte("not found"),
+	return ECSIterState{
+		valid:	false,
 	}
 }
 
@@ -82,16 +75,19 @@ func getList() {
 			//segs := s.FindStringSubmatch(segs[2])
 			wt, _ := strconv.ParseInt(segs[2], 10, 64)
 			lt, _ := strconv.ParseInt(segs[3], 10, 32)
-
+			lens := len(segs[1])
+			seg1 := key[0:lens]
 			//keyByte := fmt.Sprintf("%s", segs[1])
 			//fmt.Println(len(segs[1]))
+
 			mvccKey = MVCCKey{
-				Key:       []byte(segs[1]),
+				Key:       seg1,
 				Timestamp: hlc.Timestamp{
 					WallTime: int64(wt),
 					Logical:  int32(lt),
 				},
 			}
+			//fmt.Println(seg1, len(seg1), mvccKey.StringWithoutQuote(), len(mvccKey.Key))
 			//_, _ = f.WriteString(segs[1])
 			//fmt.Println(len(mvccKey.Key.StringWithoutQuote()))
 		} else {

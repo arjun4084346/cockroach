@@ -1,7 +1,7 @@
 #./cockroach quit
 killall -9 cockroach
 rm -rf cockroach
-rm -rf ./node1
+#rm -rf ./node1
 #rm -rf ./node2
 #rm -rf ./node3
 make build

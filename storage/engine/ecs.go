@@ -16,6 +16,8 @@ const ENDPOINT string = "http://10.247.78.204:9020"
 var KV_MAP = map[string][]byte{}
 
 func qualifiedKey(keyStr string) bool {
+	//return false
+	//fmt.Println("should not print")
 	if(!(strings.Contains(keyStr, "/Table/11") || strings.Contains(keyStr, "/Table/14")  ||			//lease && ui
 	strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
 	//!strings.Contains(keyStr, "/Table/3/1") || !strings.Contains(keyStr, "/Table/2/1") ||	//descriptor && namespace

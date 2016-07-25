@@ -42,6 +42,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/protoutil"
 	"github.com/cockroachdb/cockroach/util/uuid"
+
 )
 
 var (
@@ -171,6 +172,39 @@ func (k Key) Equal(l Key) bool {
 // Compare implements the interval.Comparable interface for tree nodes.
 func (k Key) Compare(b interval.Comparable) int {
 	return bytes.Compare(k, b.(Key))
+
+}
+
+func (k Key) Compare2(b interval.Comparable) int {
+	//fmt.Println(k, b.(Key))
+	/*if(strings.Compare(b.(Key).String(), "/Table/2/1/0/\"system\"/3/1")==0) {
+		fmt.Println("PRINTING", myCompare(k, b.(Key)))
+	}*/
+	return myCompare(k, b.(Key))
+}
+
+func myCompare(ba1 []byte, ba2 []byte) int {
+	len1 := len(ba1)
+	len2 := len(ba2)
+	a := 0
+	for ; len1>0 && len2>0;  {
+		if(ba1[a] > ba2[a]) {
+			return 1
+		}
+		if(ba1[a] < ba2[a]) {
+			return -1
+		}
+		a++
+		len1--
+		len2--
+	}
+	if(len1 == 0 && len2 == 0) {
+		return 0
+	}
+	if(len1 == 0) {
+		return -1
+	}
+	return 1
 }
 
 // String returns a string-formatted version of the key.
@@ -180,6 +214,17 @@ func (k Key) String() string {
 	}
 
 	return fmt.Sprintf("%q", []byte(k))
+}
+
+func (k Key) StringWithoutQuote() string {
+	// implement PrettyPrintWithoutQuote in printer.go
+	// might be not required, have to check!!
+	// -Arjun
+	/*if PrettyPrintKey != nil {
+		return PrettyPrintKey(k)
+	}*/
+
+	return fmt.Sprintf("%s", []byte(k))
 }
 
 // Format implements the fmt.Formatter interface.

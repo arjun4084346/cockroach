@@ -11,29 +11,30 @@ import (
 	"bytes"
 )
 
-const BUCKET string = "b1"
+var BUCKET string = "b1"
 const ENDPOINT string = "http://10.247.78.204:9020"
 var KV_MAP = map[string][]byte{}
 
 func qualifiedKey(keyStr string) bool {
 	//return false
-	//fmt.Println("should not print")
 	if(!(strings.Contains(keyStr, "/Table/11") || strings.Contains(keyStr, "/Table/14")  ||			//lease && ui
 	strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
-	//!strings.Contains(keyStr, "/Table/3/1") || !strings.Contains(keyStr, "/Table/2/1") ||	//descriptor && namespace
-	strings.Contains(keyStr, "/Local/") || strings.Contains(keyStr, "Meta") || strings.Contains(keyStr, "System"))) {
+	//strings.Contains(keyStr, "/Table/3") || strings.Contains(keyStr, "/Table/2") || 				//descriptor && namespace
+		//strings.Contains(keyStr, "/Table/1") || strings.Contains(keyStr, "/Table/4") || strings.Contains(keyStr, "/Table/5") || // system && users && zones
+	strings.Contains(keyStr, "/Local") || strings.Contains(keyStr, "Meta") || strings.Contains(keyStr, "System"))) {
 		return true
 	} else {
 		return false
 	}
 }
 
-func getObject(key MVCCKey) ([]byte, error){
-	keyStr := hex.EncodeToString([]byte(key.StringWithoutDot()))
+func getObject(key []byte) ([]byte, error){
+	keyStr := hex.EncodeToString(key)
 	data, present := KV_MAP[keyStr]
 	if(present) {
 		return data, nil
 	}
+	fmt.Println("querying", key)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 	output, err := svc.GetObject(&s3.GetObjectInput{
@@ -55,8 +56,9 @@ func getObject(key MVCCKey) ([]byte, error){
 	}
 }
 
-func deleteObject(key MVCCKey) string {
-	keyStr := hex.EncodeToString([]byte(key.StringWithoutDot()))
+func deleteObject(key []byte) string {
+	fmt.Println("deleting", key)
+	keyStr := hex.EncodeToString(key)
 	delete(KV_MAP, keyStr)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
@@ -70,12 +72,14 @@ func deleteObject(key MVCCKey) string {
 	return output.String()
 }
 
-func createObject(key MVCCKey, value []byte) string {
-	keyStr := hex.EncodeToString([]byte(key.StringWithoutDot()))
+func createObject(key []byte, value []byte) string {
+	keyStr := hex.EncodeToString(key)
 	if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
 													// need to check the difference
 		return deleteObject(key)
 	}
+	fmt.Println("inserting", key)
+
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 	output, err := svc.PutObject(&s3.PutObjectInput{
@@ -87,6 +91,7 @@ func createObject(key MVCCKey, value []byte) string {
 		return "Error"
 	}
 	KV_MAP[keyStr] = value
+	getList()
 	return output.String()
 }
 

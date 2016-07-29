@@ -45,6 +45,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/stop"
 
+	"strings"
 )
 
 // #cgo darwin LDFLAGS: -Wl,-undefined -Wl,dynamic_lookup
@@ -959,6 +960,7 @@ type rocksDBIterator struct {
 	ECSKey		MVCCKey
 	ECSValue	[]byte
 	ECSvalid  bool
+	prefix 		bool
 }
 
 // TODO(peter): Is this pool useful now that rocksDBBatch.NewIterator doesn't
@@ -980,7 +982,7 @@ func newRocksDBIterator(rdb *C.DBEngine, prefix bool, engine Reader) Iterator {
 	// as well.
 	r := iterPool.Get().(*rocksDBIterator)
 	r.init(rdb, prefix, engine)
-
+	r.prefix = prefix
 	return r
 }
 
@@ -1008,6 +1010,9 @@ func (r *rocksDBIterator) Close() {
 
 func (r *rocksDBIterator) Seek(key MVCCKey) {
 	r.checkEngineOpen()
+	/*if(qualifiedKey(key.String())) {
+		fmt.Println("called 1 for  ", key)
+	}*/
 	if len(key.Key) == 0 {
 		// start=Key("") needs special treatment since we need
 		// to access start[0] in an explicit seek.
@@ -1020,9 +1025,27 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
 			r.setECSState(ecsIterSeek(key))
-			fmt.Println("Expected Key :", r.Key())
-			fmt.Println("ECS      Key :", r.getECSKey())
-			fmt.Println()
+			//fmt.Println("Expected Key :", r.Key().Key)
+			//fmt.Println("ECS      Key :", r.getECSKey().Key.StringWithoutQuote())
+			if(r.Key().Key.Compare(r.getECSKey().Key)==0) {
+				//fmt.Println("Relax they both are same!!")
+			}
+			if(false && strings.Compare(r.Key().Key.String(), r.getECSKey().Key.StringWithoutQuote())!=0) {
+				//fmt.Println("ERROR, Even the string representation is different!!\n") goToECSKey(unsafeKey)
+				fmt.Println("Seeked Key was", key, r.prefix)
+				fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey().Key.StringWithoutQuote())
+				r.Prev()
+				fmt.Println("Prev key", r.Key())
+				if(strings.Compare(r.Key().String(), "/Min") != 0) {
+					r.Next()
+					fmt.Println("Curr key", r.Key())
+					r.Next()
+					fmt.Println("Next key", r.Key())
+					fmt.Println()
+				}
+			}
+			//fmt.Println("Their lengths are", len(r.Key().Key.String()), len(r.getECSKey().Key.StringWithoutQuote()))
+			//fmt.Println()
 		}
 	}
 }
@@ -1183,6 +1206,16 @@ func goToCKey(key MVCCKey) C.DBKey {
 		wall_time: C.int64_t(key.Timestamp.WallTime),
 		logical:   C.int32_t(key.Timestamp.Logical),
 	}
+}
+
+func goToECSKey(key MVCCKey) []byte {
+	l := len(key.Key)
+	keybytes := make([]byte, l, l+1)
+	keybytes = key.Key[0:l]
+	tsbyte := []byte(fmt.Sprintf("%19d%10d", key.Timestamp.WallTime, key.Timestamp.Logical))
+	var fullkey []byte
+	fullkey = append(keybytes, tsbyte...)
+	return fullkey
 }
 
 func cToGoKey(key C.DBKey) MVCCKey {

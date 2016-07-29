@@ -172,7 +172,6 @@ func (k Key) Equal(l Key) bool {
 // Compare implements the interval.Comparable interface for tree nodes.
 func (k Key) Compare(b interval.Comparable) int {
 	return bytes.Compare(k, b.(Key))
-
 }
 
 func (k Key) Compare2(b interval.Comparable) int {
@@ -183,7 +182,7 @@ func (k Key) Compare2(b interval.Comparable) int {
 	return myCompare(k, b.(Key))
 }
 
-func myCompare(ba1 []byte, ba2 []byte) int {
+func myCompare(ba1 Key, ba2 Key ) int {
 	len1 := len(ba1)
 	len2 := len(ba2)
 	a := 0

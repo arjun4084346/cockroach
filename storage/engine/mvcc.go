@@ -35,7 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
 
-
+	"strings"
 )
 
 const (
@@ -118,11 +118,14 @@ func (k MVCCKey) Less(l MVCCKey) bool {
 	return l.Timestamp.Less(k.Timestamp)
 }
 
-func (k MVCCKey) Lower(l MVCCKey) bool {
-	if c := k.Key.Compare2(l.Key); c != 0 {
-		//if(strings.Compare(l.String(), "/Table/2/1/0/\"system\"/3/1")==0) {
-			//fmt.Println()
-		//}
+func (k MVCCKey) Less2(l MVCCKey) bool {
+	key1 := fmt.Sprintf("%s", k.Key)
+	key2 := fmt.Sprintf("%s", l.Key.StringWithoutQuote())
+	//fmt.Println("comparing", key1, key2)
+
+	//if c := k.Key.Compare(l.Key); c != 0 {
+	if c := strings.Compare(key1, key2); c != 0 {
+		//fmt.Println("returning", c)
 		return c < 0
 	}
 	if !l.IsValue() {
@@ -165,18 +168,18 @@ func (k MVCCKey) String() string {
 	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp)
 }
 
+func (k MVCCKey) StringWithoutDot() string {
+	if !k.IsValue() {
+		return k.Key.String()
+	}
+	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp.StringWithoutDot())
+}
+
 func (k MVCCKey) StringWithoutDotWithoutQuote() string {
 	if !k.IsValue() {
 		return k.Key.String()
 	}
 	return fmt.Sprintf("%s/%s", k.Key.StringWithoutQuote(), k.Timestamp.StringWithoutDot())
-}
-
-func (k MVCCKey) StringWithoutDot() string {
-	if !k.IsValue() {
-		return k.Key.String()
-	}
-	return fmt.Sprintf("%s/%s", k.Key.String(), k.Timestamp.StringWithoutDot())
 }
 
 func (k MVCCKey) StringWithoutQuote() string {
@@ -798,21 +801,22 @@ func mvccGetInternal(
 
 	iter.Seek(seekKey)
 
-	if(qualifiedKey(seekKey.String())) {
-		if !iter.(*rocksDBBatchIterator).ECSValid() {		//write declarations in engine.go Iterator interface --Arjun
+	//if(qualifiedKey(seekKey.String())) {
+		/*if !iter.ECSValid() {		//write declarations in engine.go Iterator interface --Arjun
 			if err := iter.Error(); err != nil {			//implement iter.ECSError()
 				return nil, nil, safeValue, err
 			}
 			return nil, ignoredIntents, safeValue, nil
-		}
-	} else {
+		}*/
+	//} else {
 		if !iter.Valid() {
+			//fmt.Println("TYPE........................", reflect.TypeOf(iter))	//interesting to see when it ever comes here!!
 			if err := iter.Error(); err != nil {
 				return nil, nil, safeValue, err
 			}
 			return nil, ignoredIntents, safeValue, nil
 		}
-	}
+	//}
 
 	unsafeKey := iter.unsafeKey()
 	if !unsafeKey.Key.Equal(metaKey.Key) {
@@ -851,17 +855,50 @@ func mvccGetInternal(
 	}
 	keyStr := metaKey.String()
 	if(qualifiedKey(keyStr)) {
+		//fmt.Printf("%s\n% v\n", unsafeKey, keybytes)
+		//fmt.Printf("% x\n", tsbyte)
+		//fmt.Printf("% v\n", tsbyte)
+		//fmt.Printf("% v\n", fullkey)
+
+		/*bs := make([]byte, 4)
+		binary.LittleEndian.P
+		fmt.Println(bs)*/
+		//fmt.Println()
+
+		/*l := len(unsafeKey.Key)
+		for i:=0; i<l; i++ {
+			fmt.Printf("%s", string(unsafeKey.Key[i]))
+		}
+		fmt.Println()
+		fmt.Println("length=",l)
+		ba := make([]byte, len(unsafeKey.Key), len(unsafeKey.Key)+1)
+		copy(ba, unsafeKey.Key)
+		fmt.Println(ba)
+		fmt.Println(string(ba))
+		fmt.Println(unsafeKey.Key)
+		fmt.Println()*/
 		//fmt.Println(metaKey.String())
 		//fmt.Println(seekKey.String())
 		//fmt.Println("Key queried is", unsafeKey.String())
 		//fmt.Println(iter.(*rocksDBIterator).curr)
 		//fmt.Println()
-		data, err := getObject(unsafeKey)
+		/*keybytes := make([]byte, l+12, l+13)
+		keybytes = unsafeKey.Key[0:l]
+		for i:=0; i; i++ {
+			fmt.Fprintf(&buf, "%s", unsafeKey.Key[i])
+			//keybytes[i] = unsafeKey.Key[i]
+		}
+
+
+		fmt.Println(keybytes)*/
+		ECSKey := goToECSKey(unsafeKey)
+		//fmt.Println("Querying", unsafeKey)
+		data, err := getObject(ECSKey)
 		if(err == nil) {
 			value.RawBytes = data
 		} else {
 			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.StringWithoutDot())
-			_ = createObject(unsafeKey, value.RawBytes)
+			_ = createObject(ECSKey, value.RawBytes)
 		}
 		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
 		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n" + unsafeKey.String() + "\n\n")

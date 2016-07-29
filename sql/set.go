@@ -67,6 +67,8 @@ func (p *planner) Set(n *parser.Set) (planNode, error) {
 			}
 		}
 		p.session.Database = dbName
+		//engine.BUCKET = dbName	//not required probably, because key do not and NEED NOT to store database info, there is
+															//only one monolithinc KV store!!
 
 	case `SYNTAX`:
 		s, err := p.getStringVal(name, typedValues)

@@ -50,7 +50,7 @@ func (t Timestamp) StringWithoutDot() string {
 	// How String() ensures that t.Walltime/1E9 is of 10 digit!!
 	// if it is shorter it can create problem in iterator operations
 	// -Arjun
-	return fmt.Sprintf("%d,%d", t.WallTime, t.Logical)
+	return fmt.Sprintf("%d,%d", t.WallTime, t.Logical)		//IMPORTANT, SHOULD IT BE %19d ?? because otherwise that may screw the sorting, that also goes with every table/column index id too!!! OMG :(
 }
 
 // Add returns a timestamp with the WallTime and Logical components increased.

@@ -1030,13 +1030,19 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
 			r.setECSState(ECSIterSeek(key, r.prefix, false))
-			if(r.getECSKey().Equal(r.Key())) {
-				fmt.Printf(".")
+			if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {
+				//fmt.Printf(".")
 			} else
 			if(strings.Compare(key.String(), "/Table/-9223372036854775808") != 0) {
-				fmt.Println("Seeked Key was", key, r.prefix)
-				if(strings.Compare(r.getECSKey().String(), "/Table/3/1/50/2/1")==0) {
-				r.setECSState(ECSIterSeek(key, r.prefix, true))
+				fmt.Println("\nSEEKED KEY WAS", key, r.prefix)
+				if(
+						strings.Compare(key.String(), "/Table/3/1/13/1/2")==0 ||
+						strings.Compare(key.String(), "/Table/2/1/0/\"system\"/3/1")==0 ||
+						strings.Compare(key.String(), "/Table/2/1/1/\"rangelog\"/3/1")==0 ||
+						strings.Compare(key.String(), "/Table/2/1/1/\"eventlog\"/3/1")==0 ||
+						strings.Compare(key.String(), "/Table/3/1/1/2/1")==0) {
+
+					r.setECSState(ECSIterSeek(key, r.prefix, true))
 				}
 				fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey())
 				/*r.Prev()
@@ -1047,7 +1053,6 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 					r.Next()
 					fmt.Println("Next key", r.Key())
 				}*/
-				fmt.Println()
 			}
 		}
 	}

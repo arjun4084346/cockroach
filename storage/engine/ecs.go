@@ -78,7 +78,7 @@ func createObject(key []byte, value []byte, mvcckey MVCCKey) string{
 													// need to check the difference
 		return deleteObject(key, mvcckey)
 	}
-	fmt.Printf("INSERTING % x %s\n", key, mvcckey)
+	//fmt.Printf("INSERTING % x %s\n", key, mvcckey)
 
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))

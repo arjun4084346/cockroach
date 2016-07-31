@@ -174,36 +174,18 @@ func (k Key) Compare(b interval.Comparable) int {
 	return bytes.Compare(k, b.(Key))
 }
 
-func (k Key) Compare2(b interval.Comparable) int {
-	//fmt.Println(k, b.(Key))
-	/*if(strings.Compare(b.(Key).String(), "/Table/2/1/0/\"system\"/3/1")==0) {
-		fmt.Println("PRINTING", myCompare(k, b.(Key)))
-	}*/
-	return myCompare(k, b.(Key))
-}
-
-func myCompare(ba1 Key, ba2 Key ) int {
-	len1 := len(ba1)
-	len2 := len(ba2)
-	a := 0
-	for ; len1>0 && len2>0;  {
-		if(ba1[a] > ba2[a]) {
-			return 1
+func (k1 Key) StartsWith(k2 Key) bool {
+	l := len(k1)
+	if len(k2) < l {
+		l = len(k2)
+	}
+	for i := 0; i < l; i++ {
+		c1, c2 := k1[i], k2[i]
+		if c1 != c2 {
+			return false
 		}
-		if(ba1[a] < ba2[a]) {
-			return -1
-		}
-		a++
-		len1--
-		len2--
 	}
-	if(len1 == 0 && len2 == 0) {
-		return 0
-	}
-	if(len1 == 0) {
-		return -1
-	}
-	return 1
+	return true
 }
 
 // String returns a string-formatted version of the key.

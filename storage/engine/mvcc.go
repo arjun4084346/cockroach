@@ -34,8 +34,6 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
-
-	"strings"
 )
 
 const (
@@ -128,6 +126,8 @@ func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
 	if !k.IsValue() {
 		return true
 	}
+
+
 	return l.Timestamp.Less(k.Timestamp)
 
 	/*if (!SplitKey(a, &key_a, &ts_a) ||
@@ -156,10 +156,6 @@ func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
 // Equal returns whether two keys are identical.
 func (k MVCCKey) Equal(l MVCCKey) bool {
 	return k.Key.Compare(l.Key) == 0 && k.Timestamp == l.Timestamp
-}
-
-func (k MVCCKey) myEqual(l MVCCKey) bool {
-	return k.Key.Compare2(l.Key) == 0 && k.Timestamp == l.Timestamp
 }
 
 // IsValue returns true iff the timestamp is non-zero.

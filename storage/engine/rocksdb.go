@@ -46,6 +46,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/stop"
 
 	"strings"
+	"encoding/binary"
 )
 
 // #cgo darwin LDFLAGS: -Wl,-undefined -Wl,dynamic_lookup
@@ -983,6 +984,7 @@ func newRocksDBIterator(rdb *C.DBEngine, prefix bool, engine Reader) Iterator {
 	r := iterPool.Get().(*rocksDBIterator)
 	r.init(rdb, prefix, engine)
 	r.prefix = prefix
+	//fmt.Println("Iterator created with perfix", prefix)
 	return r
 }
 
@@ -1004,6 +1006,9 @@ func (r *rocksDBIterator) destroy() {
 
 // The following methods implement the Iterator interface.
 func (r *rocksDBIterator) Close() {
+	/*fmt.Println("iterator closed!!")
+	fmt.Println()
+	fmt.Println()*/
 	r.destroy()
 	iterPool.Put(r)
 }
@@ -1024,28 +1029,26 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
-			r.setECSState(ecsIterSeek(key))
-			//fmt.Println("Expected Key :", r.Key().Key)
-			//fmt.Println("ECS      Key :", r.getECSKey().Key.StringWithoutQuote())
-			if(r.Key().Key.Compare(r.getECSKey().Key)==0) {
-				//fmt.Println("Relax they both are same!!")
-			}
-			if(false && strings.Compare(r.Key().Key.String(), r.getECSKey().Key.StringWithoutQuote())!=0) {
-				//fmt.Println("ERROR, Even the string representation is different!!\n") goToECSKey(unsafeKey)
+			r.setECSState(ECSIterSeek(key, r.prefix, false))
+			if(r.getECSKey().Equal(r.Key())) {
+				fmt.Printf(".")
+			} else
+			if(strings.Compare(key.String(), "/Table/-9223372036854775808") != 0) {
 				fmt.Println("Seeked Key was", key, r.prefix)
-				fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey().Key.StringWithoutQuote())
-				r.Prev()
+				if(strings.Compare(r.getECSKey().String(), "/Table/3/1/50/2/1")==0) {
+				r.setECSState(ECSIterSeek(key, r.prefix, true))
+				}
+				fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey())
+				/*r.Prev()
 				fmt.Println("Prev key", r.Key())
 				if(strings.Compare(r.Key().String(), "/Min") != 0) {
 					r.Next()
 					fmt.Println("Curr key", r.Key())
 					r.Next()
 					fmt.Println("Next key", r.Key())
-					fmt.Println()
-				}
+				}*/
+				fmt.Println()
 			}
-			//fmt.Println("Their lengths are", len(r.Key().Key.String()), len(r.getECSKey().Key.StringWithoutQuote()))
-			//fmt.Println()
 		}
 	}
 }
@@ -1212,11 +1215,86 @@ func goToECSKey(key MVCCKey) []byte {
 	l := len(key.Key)
 	keybytes := make([]byte, l, l+1)
 	keybytes = key.Key[0:l]
-	tsbyte := []byte(fmt.Sprintf("%19d%10d", key.Timestamp.WallTime, key.Timestamp.Logical))
-	var fullkey []byte
-	fullkey = append(keybytes, tsbyte...)
-	return fullkey
+
+	if key.Timestamp != hlc.ZeroTimestamp {
+		//tsbyte := []byte(fmt.Sprintf("%19d%10d", key.Timestamp.WallTime, key.Timestamp.Logical))
+		var fullkey []byte
+		time := TSinGo(key.Timestamp)
+		fullkey = append(keybytes, time...)
+		/*fmt.Println(key)
+		fmt.Printf("% x\n", time)
+		fmt.Printf("% x\n", fullkey)*/
+		return fullkey
+	} else {
+		//fmt.Println("yipee, 0 timestamp!!")
+		return keybytes
+	}
 }
+func TSinGo(ts hlc.Timestamp) []byte {
+	var b []byte
+	b = make([]byte, 12, 13)
+	wt := ts.WallTime
+	lt := ts.Logical
+	b[0] = byte(wt >> 56)
+	b[1] = byte(wt >> 48)
+	b[2] = byte(wt >> 40)
+	b[3] = byte(wt >> 32)
+	b[4] = byte(wt >> 24)
+	b[5] = byte(wt >> 16)
+	b[6] = byte(wt >> 8)
+	b[7] = byte(wt)
+	b[8] = byte(lt >> 24)
+	b[9] = byte(lt >> 16)
+	b[10] = byte(lt >> 8)
+	b[11] = byte(lt)
+	return b
+}
+
+func TSinGo2(ts []byte) hlc.Timestamp {
+	/*var wt int64
+	wt = ts[0]
+	wt = (wt << 8) | ts[1]
+	wt = (wt << 8) | ts[2]
+	wt = (wt << 8) | ts[3]
+	wt = (wt << 8) | ts[4]
+	wt = (wt << 8) | ts[5]
+	wt = (wt << 8) | ts[6]
+	wt = (wt << 8) | ts[7]
+	var lt int32
+	lt = ts[8]
+	lt = (lt << 8) | ts[9]
+	lt = (lt << 8) | ts[10]
+	lt = (lt << 8) | ts[11]*/
+
+	/*var wtSlice = ts[:8]
+	wt := binary.BigEndian.Uint64(wtSlice)
+	var ltSlice = ts[8:12]
+	lt := binary.BigEndian.Uint32(ltSlice)*/
+
+	/*wtbuf := ts[:8]
+	wt := new(big.Int)
+	wt.SetBytes(wtbuf)
+	ltbuf := ts[8:]
+	lt := new(big.Int)
+	wt.SetBytes(ltbuf)*/
+
+	var wt int64
+	wtbuf := ts[:8]
+	wbuf := bytes.NewReader(wtbuf)
+	binary.Read(wbuf, binary.BigEndian, &wt)
+	var lt int32
+	ltbuf := ts[8:]
+	lbuf := bytes.NewReader(ltbuf)
+	binary.Read(lbuf, binary.BigEndian, &lt)
+
+	timeStamp := hlc.Timestamp{
+			WallTime: wt,
+			Logical:  lt,
+		}
+	return timeStamp
+}
+
+
 
 func cToGoKey(key C.DBKey) MVCCKey {
 	// When converting a C.DBKey to an MVCCKey, give the underlying slice an

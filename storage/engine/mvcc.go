@@ -118,20 +118,39 @@ func (k MVCCKey) Less(l MVCCKey) bool {
 	return l.Timestamp.Less(k.Timestamp)
 }
 
-func (k MVCCKey) Less2(l MVCCKey) bool {
-	key1 := fmt.Sprintf("%s", k.Key)
-	key2 := fmt.Sprintf("%s", l.Key.StringWithoutQuote())
-	//fmt.Println("comparing", key1, key2)
-
-	//if c := k.Key.Compare(l.Key); c != 0 {
-	if c := strings.Compare(key1, key2); c != 0 {
-		//fmt.Println("returning", c)
-		return c < 0
-	}
-	if !l.IsValue() {
+func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
+	if c := k.Key.Compare(l.Key); c != 0 {		//15.Less2(14) => true
+		return c < 0														//12
+	}																					//14
+	if !l.IsValue() {													//16
 		return false
 	}
-	return k.Timestamp.Less(l.Timestamp)
+	if !k.IsValue() {
+		return true
+	}
+	return l.Timestamp.Less(k.Timestamp)
+
+	/*if (!SplitKey(a, &key_a, &ts_a) ||
+		!SplitKey(b, &key_b, &ts_b)) {
+		// This should never happen unless there is some sort of corruption of
+		// the keys.
+		return a.compare(b);
+	}
+
+	const int c = key_a.compare(key_b);
+	if (c != 0) {
+		return c;
+	}
+	if (ts_a.empty()) {
+		if (ts_b.empty()) {
+			return 0;
+		}
+		return -1;
+	} else if (ts_b.empty()) {
+		return +1;
+	}
+	return ts_b.compare(ts_a);
+}*/
 }
 
 // Equal returns whether two keys are identical.
@@ -855,50 +874,13 @@ func mvccGetInternal(
 	}
 	keyStr := metaKey.String()
 	if(qualifiedKey(keyStr)) {
-		//fmt.Printf("%s\n% v\n", unsafeKey, keybytes)
-		//fmt.Printf("% x\n", tsbyte)
-		//fmt.Printf("% v\n", tsbyte)
-		//fmt.Printf("% v\n", fullkey)
-
-		/*bs := make([]byte, 4)
-		binary.LittleEndian.P
-		fmt.Println(bs)*/
-		//fmt.Println()
-
-		/*l := len(unsafeKey.Key)
-		for i:=0; i<l; i++ {
-			fmt.Printf("%s", string(unsafeKey.Key[i]))
-		}
-		fmt.Println()
-		fmt.Println("length=",l)
-		ba := make([]byte, len(unsafeKey.Key), len(unsafeKey.Key)+1)
-		copy(ba, unsafeKey.Key)
-		fmt.Println(ba)
-		fmt.Println(string(ba))
-		fmt.Println(unsafeKey.Key)
-		fmt.Println()*/
-		//fmt.Println(metaKey.String())
-		//fmt.Println(seekKey.String())
-		//fmt.Println("Key queried is", unsafeKey.String())
-		//fmt.Println(iter.(*rocksDBIterator).curr)
-		//fmt.Println()
-		/*keybytes := make([]byte, l+12, l+13)
-		keybytes = unsafeKey.Key[0:l]
-		for i:=0; i; i++ {
-			fmt.Fprintf(&buf, "%s", unsafeKey.Key[i])
-			//keybytes[i] = unsafeKey.Key[i]
-		}
-
-
-		fmt.Println(keybytes)*/
 		ECSKey := goToECSKey(unsafeKey)
-		//fmt.Println("Querying", unsafeKey)
 		data, err := getObject(ECSKey)
 		if(err == nil) {
 			value.RawBytes = data
 		} else {
 			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.StringWithoutDot())
-			_ = createObject(ECSKey, value.RawBytes)
+			_ = createObject(ECSKey, value.RawBytes, unsafeKey)
 		}
 		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
 		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n" + unsafeKey.String() + "\n\n")

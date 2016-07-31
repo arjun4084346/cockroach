@@ -34,7 +34,7 @@ func getObject(key []byte) ([]byte, error){
 	if(present) {
 		return data, nil
 	}
-	fmt.Println("querying", key)
+	fmt.Printf("querying % x\n", key)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
 	output, err := svc.GetObject(&s3.GetObjectInput{
@@ -56,8 +56,8 @@ func getObject(key []byte) ([]byte, error){
 	}
 }
 
-func deleteObject(key []byte) string {
-	fmt.Println("deleting", key)
+func deleteObject(key []byte, mvcckey MVCCKey) string {
+	fmt.Printf("DELETING % x %s\n", key, mvcckey)
 	keyStr := hex.EncodeToString(key)
 	delete(KV_MAP, keyStr)
 	sess := session.New()
@@ -72,13 +72,13 @@ func deleteObject(key []byte) string {
 	return output.String()
 }
 
-func createObject(key []byte, value []byte) string {
+func createObject(key []byte, value []byte, mvcckey MVCCKey) string{
 	keyStr := hex.EncodeToString(key)
 	if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
 													// need to check the difference
-		return deleteObject(key)
+		return deleteObject(key, mvcckey)
 	}
-	fmt.Println("inserting", key)
+	fmt.Printf("INSERTING % x %s\n", key, mvcckey)
 
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
@@ -91,7 +91,7 @@ func createObject(key []byte, value []byte) string {
 		return "Error"
 	}
 	KV_MAP[keyStr] = value
-	getList()
+	//getList()
 	return output.String()
 }
 

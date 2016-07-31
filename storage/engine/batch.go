@@ -187,7 +187,7 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	b.repr = b.repr[:len(b.repr)-(maxVarintLen32-n)]
 
 	if(qualifiedKey(key.String())) {
-		_ = createObject(goToECSKey(key), value)
+		_ = createObject(goToECSKey(key), value, key)
 		/*f, _ := os.OpenFile("/tmp/log", os.O_APPEND|os.O_WRONLY, 0600)
 		_, _ = f.WriteString(key.String() + " : ")
 		if(len(value) == 0) {

@@ -116,6 +116,7 @@ func (k MVCCKey) Less(l MVCCKey) bool {
 	return l.Timestamp.Less(k.Timestamp)
 }
 
+// added by Arjun, to do key comparison according to the observed data!!
 func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
 	if c := k.Key.Compare(l.Key); c != 0 {		//15.Less2(14) => true
 		return c < 0														//12
@@ -123,11 +124,9 @@ func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
 	if !l.IsValue() {													//16
 		return false
 	}
-	if !k.IsValue() {
+	if !k.IsValue() {		// adding this according to the observed data, not found anywhere in the doc though. -Arjun
 		return true
 	}
-
-
 	return l.Timestamp.Less(k.Timestamp)
 }
 
@@ -159,27 +158,6 @@ func (k MVCCKey) String() string {
 		return k.Key.String()
 	}
 	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp)
-}
-
-func (k MVCCKey) StringWithoutDot() string {
-	if !k.IsValue() {
-		return k.Key.String()
-	}
-	return fmt.Sprintf("%s/%s", k.Key, k.Timestamp.StringWithoutDot())
-}
-
-func (k MVCCKey) StringWithoutDotWithoutQuote() string {
-	if !k.IsValue() {
-		return k.Key.String()
-	}
-	return fmt.Sprintf("%s/%s", k.Key.StringWithoutQuote(), k.Timestamp.StringWithoutDot())
-}
-
-func (k MVCCKey) StringWithoutQuote() string {
-	if !k.IsValue() {
-		return k.Key.String()
-	}
-	return fmt.Sprintf("%s/%s", k.Key.StringWithoutQuote(), k.Timestamp.String())
 }
 
 // MVCCKeyValue contains the raw bytes of the value for a key.
@@ -791,22 +769,16 @@ func mvccGetInternal(
 			return nil, ignoredIntents, safeValue, nil
 		}
 	}
-
-
-		if !iter.Valid() {
-			//fmt.Println("TYPE........................", reflect.TypeOf(iter))	//interesting to see when it ever comes here!!
-			if err := iter.Error(); err != nil {
-				return nil, nil, safeValue, err
-			}
-			return nil, ignoredIntents, safeValue, nil
+	if !iter.Valid() {
+		if err := iter.Error(); err != nil {
+			return nil, nil, safeValue, err
 		}
+		return nil, ignoredIntents, safeValue, nil
+	}
 
 	unsafeKey := iter.unsafeKey()
 	if qualifiedKey(seekKey.String()) && qualifiedIter(iter) {
-		fmt.Printf("replacing key from \n%s to\n", unsafeKey)
 		unsafeKey = iter.(*rocksDBIterator).getECSKey()
-		fmt.Println(unsafeKey)
-		fmt.Println()
 	}
 	
 	if !unsafeKey.Key.Equal(metaKey.Key) {
@@ -833,10 +805,7 @@ func mvccGetInternal(
 	}
 	l := len(iter.unsafeValue())
 	if qualifiedKey(seekKey.String()) && qualifiedIter(iter) {
-		fmt.Printf("replacing value length from \n%v to\n", l)
 		l = len(iter.(*rocksDBIterator).getECSValue())
-		fmt.Println(l)
-		fmt.Println()
 	}
 	if l == 0 {
 		// Value is deleted.
@@ -851,10 +820,7 @@ func mvccGetInternal(
 	}
 	if qualifiedKey(seekKey.String()) && qualifiedIter(iter) {		// Do not know the importance of unsafe vs safe values,
 																																// not required now, probably. -Arjun
-		//fmt.Printf("replacing value from \n%v to\n", value.RawBytes)
 		value.RawBytes = iter.(*rocksDBIterator).getECSValue()
-		//fmt.Println(value.RawBytes)
-		//fmt.Println()
 	}
 	keyStr := metaKey.String()
 	if(qualifiedKey(keyStr)) {
@@ -866,11 +832,6 @@ func mvccGetInternal(
 			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
 			_ = createObject(ECSKey, value.RawBytes, unsafeKey)
 		}
-		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)
-		_, _ = f.WriteString(metaKey.String() + "\n" + seekKey.String() + "\n" + unsafeKey.String() + "\n\n")
-		//_, _ = f.WriteString(iter.Key().String() + "\n" + unsafeKey.String() + "\n\n")
-		defer f.Close()
-		f.Sync()*/
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {

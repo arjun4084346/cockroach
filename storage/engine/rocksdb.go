@@ -947,6 +947,8 @@ func (r *rocksDBBatch) flushMutations() {
 	r.normalIter.reseek = true
 }
 
+// ECSKey, ECSvalid, prefix, replace added. -Arjun
+// replace is true if and only if ECSvalid and ECSKey holds data valid data seeked from ECS
 type rocksDBIterator struct {
 	engine 		Reader
 	iter   		*C.DBIterator
@@ -955,9 +957,7 @@ type rocksDBIterator struct {
 	key    		C.DBKey
 	value  		C.DBSlice
 	keyList   list.List
-	curr   		int
 	ECSKey		MVCCKey
-	ECSValue	[]byte
 	ECSvalid  bool
 	prefix 		bool
 	replace		bool
@@ -1020,7 +1020,6 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 	} else {
 		// We can avoid seeking if we're already at the key we seek.
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
-			fmt.Println("are we coming here !!!")
 			return
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
@@ -1028,41 +1027,7 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 			r.setECSState(ECSIterSeek(key, r.prefix, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 			if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
 				//((r.Key().Key.Compare(r.getECSKey().Key)==0)&&(!r.Key().IsValue()))) {		//ignore contradicting info for now!! :(
-				//fmt.Printf(".")
 				r.replace = true
-			} else {
-					if (!r.valid && !r.ECSvalid) {
-						fmt.Printf("both valids are false, relax. \nkey %skey %s\n", r.getECSKey(), r.Key())
-					} else {
-						if (strings.Compare(key.String(), "/Table/-9223372036854775808") != 0) {
-							fmt.Println("\nSEEKED KEY WAS", key, r.prefix)
-							/*if (
-									strings.Compare(key.String(), "/Table/3/1/13/1/2") == 0 ||
-									strings.Compare(key.String(), "/Table/2/1/0/\"system\"/3/1") == 0 ||
-									strings.Compare(key.String(), "/Table/2/1/1/\"rangelog\"/3/1") == 0 ||
-									strings.Compare(key.String(), "/Table/2/1/1/\"eventlog\"/3/1") == 0 ||
-									strings.Compare(key.String(), "/Table/3/1/1/2/1") == 0 ||
-									strings.Compare(key.String(), "/Table/2/1/0/\"bank\"/3/1") == 0) {
-
-								r.setECSState(ECSIterSeek(key, r.prefix, true))
-							}*/
-							//fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey())
-							fmt.Printf("--% x--%d-%d-\n", r.Key().Key, r.Key().Timestamp.WallTime, r.Key().Timestamp.Logical)
-							fmt.Printf("--% x--%d-%d-\n", r.getECSKey().Key, r.getECSKey().Timestamp.WallTime, r.getECSKey().Timestamp.Logical)
-							/*if (strings.Compare(key.String(), "/Table/2/1/0/\"bank\"/3/1") == 0) {
-								if r.valid {
-									r.Next()
-									fmt.Println("Curr key", r.Key())
-									r.Next()
-									fmt.Println("Next key", r.Key())
-									*//*var aaa []byte
-									aaa[4] = 1*//*
-								} else {
-									fmt.Printf("IT IS NOT VALID!! prefix is %v\n", r.prefix)
-								}
-							}*/
-						}
-				}
 			}
 		} else {
 			r.replace = false
@@ -1184,9 +1149,7 @@ func (r *rocksDBIterator) setState(state C.DBIterState) {
 func (r *rocksDBIterator) setECSState(state ECSIterState) {
 	r.ECSvalid = state.valid
 	//r.reseek = false			// fix this. set this also, understand the significance!! -Arjun
-												// update : maybe used to re-seek using the same iter, it should be set to false in that case. -Arjun
 	r.ECSKey = state.key
-	r.ECSValue = state.value
 }
 
 func (r *rocksDBIterator) ComputeStats(start, end MVCCKey, nowNanos int64) (enginepb.MVCCStats, error) {
@@ -1242,21 +1205,17 @@ func goToECSKey(key MVCCKey) []byte {
 	keybytes = key.Key[0:l]
 
 	if key.Timestamp != hlc.ZeroTimestamp {
-		//tsbyte := []byte(fmt.Sprintf("%19d%10d", key.Timestamp.WallTime, key.Timestamp.Logical))
 		var fullkey []byte
-		time := TSinGo(key.Timestamp)
+		time := putTimestamp(key.Timestamp)
 		fullkey = append(keybytes, time...)
-		/*fmt.Println(key)
-		fmt.Printf("% x\n", time)
-		fmt.Printf("% x\n", fullkey)*/
 		return fullkey
 	} else {
-		//fmt.Println("yipee, 0 timestamp!!")
 		return keybytes
 	}
 }
 
-func TSinGo(ts hlc.Timestamp) []byte {
+// works like putUint64
+func putTimestamp(ts hlc.Timestamp) []byte {
 	var b []byte
 	b = make([]byte, 12, 13)
 	wt := ts.WallTime
@@ -1276,34 +1235,7 @@ func TSinGo(ts hlc.Timestamp) []byte {
 	return b
 }
 
-func TSinGo2(ts []byte) hlc.Timestamp {
-	/*var wt int64
-	wt = ts[0]
-	wt = (wt << 8) | ts[1]
-	wt = (wt << 8) | ts[2]
-	wt = (wt << 8) | ts[3]
-	wt = (wt << 8) | ts[4]
-	wt = (wt << 8) | ts[5]
-	wt = (wt << 8) | ts[6]
-	wt = (wt << 8) | ts[7]
-	var lt int32
-	lt = ts[8]
-	lt = (lt << 8) | ts[9]
-	lt = (lt << 8) | ts[10]
-	lt = (lt << 8) | ts[11]*/
-
-	/*var wtSlice = ts[:8]
-	wt := binary.BigEndian.Uint64(wtSlice)
-	var ltSlice = ts[8:12]
-	lt := binary.BigEndian.Uint32(ltSlice)*/
-
-	/*wtbuf := ts[:8]
-	wt := new(big.Int)
-	wt.SetBytes(wtbuf)
-	ltbuf := ts[8:]
-	lt := new(big.Int)
-	wt.SetBytes(ltbuf)*/
-
+func getTimestamp(ts []byte) hlc.Timestamp {
 	var wt int64
 	wtbuf := ts[:8]
 	wbuf := bytes.NewReader(wtbuf)

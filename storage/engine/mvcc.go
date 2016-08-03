@@ -129,28 +129,6 @@ func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
 
 
 	return l.Timestamp.Less(k.Timestamp)
-
-	/*if (!SplitKey(a, &key_a, &ts_a) ||
-		!SplitKey(b, &key_b, &ts_b)) {
-		// This should never happen unless there is some sort of corruption of
-		// the keys.
-		return a.compare(b);
-	}
-
-	const int c = key_a.compare(key_b);
-	if (c != 0) {
-		return c;
-	}
-	if (ts_a.empty()) {
-		if (ts_b.empty()) {
-			return 0;
-		}
-		return -1;
-	} else if (ts_b.empty()) {
-		return +1;
-	}
-	return ts_b.compare(ts_a);
-}*/
 }
 
 // Equal returns whether two keys are identical.
@@ -814,16 +792,7 @@ func mvccGetInternal(
 		}
 	}
 
-	iter.Seek(seekKey)
 
-	//if(qualifiedKey(seekKey.String())) {
-		/*if !iter.ECSValid() {		//write declarations in engine.go Iterator interface --Arjun
-			if err := iter.Error(); err != nil {			//implement iter.ECSError()
-				return nil, nil, safeValue, err
-			}
-			return nil, ignoredIntents, safeValue, nil
-		}*/
-	//} else {
 		if !iter.Valid() {
 			//fmt.Println("TYPE........................", reflect.TypeOf(iter))	//interesting to see when it ever comes here!!
 			if err := iter.Error(); err != nil {
@@ -831,9 +800,15 @@ func mvccGetInternal(
 			}
 			return nil, ignoredIntents, safeValue, nil
 		}
-	//}
 
 	unsafeKey := iter.unsafeKey()
+	if qualifiedKey(seekKey.String()) && qualifiedIter(iter) {
+		fmt.Printf("replacing key from \n%s to\n", unsafeKey)
+		unsafeKey = iter.(*rocksDBIterator).getECSKey()
+		fmt.Println(unsafeKey)
+		fmt.Println()
+	}
+	
 	if !unsafeKey.Key.Equal(metaKey.Key) {
 		return nil, ignoredIntents, safeValue, nil
 	}
@@ -856,8 +831,14 @@ func mvccGetInternal(
 		// are the only ones that we're not certain about. The correct key has
 		// already been read above, so there's nothing left to do.
 	}
-
-	if len(iter.unsafeValue()) == 0 {
+	l := len(iter.unsafeValue())
+	if qualifiedKey(seekKey.String()) && qualifiedIter(iter) {
+		fmt.Printf("replacing value length from \n%v to\n", l)
+		l = len(iter.(*rocksDBIterator).getECSValue())
+		fmt.Println(l)
+		fmt.Println()
+	}
+	if l == 0 {
 		// Value is deleted.
 		return nil, ignoredIntents, safeValue, nil
 	}
@@ -868,6 +849,13 @@ func mvccGetInternal(
 	} else {
 		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
 	}
+	if qualifiedKey(seekKey.String()) && qualifiedIter(iter) {		// Do not know the importance of unsafe vs safe values,
+																																// not required now, probably. -Arjun
+		//fmt.Printf("replacing value from \n%v to\n", value.RawBytes)
+		value.RawBytes = iter.(*rocksDBIterator).getECSValue()
+		//fmt.Println(value.RawBytes)
+		//fmt.Println()
+	}
 	keyStr := metaKey.String()
 	if(qualifiedKey(keyStr)) {
 		ECSKey := goToECSKey(unsafeKey)
@@ -875,7 +863,7 @@ func mvccGetInternal(
 		if(err == nil) {
 			value.RawBytes = data
 		} else {
-			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.StringWithoutDot())
+			fmt.Printf("* Key %s not found in ECS.\n", unsafeKey.String())
 			_ = createObject(ECSKey, value.RawBytes, unsafeKey)
 		}
 		/*f, _ := os.OpenFile("/tmp/log2", os.O_APPEND|os.O_WRONLY, 0600)

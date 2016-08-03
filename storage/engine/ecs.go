@@ -9,10 +9,11 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"bytes"
+	"reflect"
 )
 
 var BUCKET string = "b1"
-const ENDPOINT string = "http://10.247.78.204:9020"
+const ENDPOINT string = "http://10.247.78.217:9020"
 var KV_MAP = map[string][]byte{}
 
 func qualifiedKey(keyStr string) bool {
@@ -26,6 +27,13 @@ func qualifiedKey(keyStr string) bool {
 	} else {
 		return false
 	}
+}
+
+func qualifiedIter(iter Iterator) bool {
+	if (strings.Compare(reflect.TypeOf(iter).String(),	"*engine.rocksDBIterator") == 0) && iter.(*rocksDBIterator).replace {
+		return true
+	}
+	return false
 }
 
 func getObject(key []byte) ([]byte, error){
@@ -57,7 +65,7 @@ func getObject(key []byte) ([]byte, error){
 }
 
 func deleteObject(key []byte, mvcckey MVCCKey) string {
-	fmt.Printf("DELETING % x %s\n", key, mvcckey)
+	fmt.Printf("DELETING %s\n", mvcckey)
 	keyStr := hex.EncodeToString(key)
 	delete(KV_MAP, keyStr)
 	sess := session.New()
@@ -74,11 +82,11 @@ func deleteObject(key []byte, mvcckey MVCCKey) string {
 
 func createObject(key []byte, value []byte, mvcckey MVCCKey) string{
 	keyStr := hex.EncodeToString(key)
-	if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
+	/*if(len(value) == 0) {		//Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
 													// need to check the difference
-		return deleteObject(key, mvcckey)
-	}
-	//fmt.Printf("INSERTING % x %s\n", key, mvcckey)
+		return deleteObject(key, mvcckey)		//Update : Maybe the old KV pair is deleted from rocks, but this KV (with blank V) is to be inserted
+	}*/
+	fmt.Printf("INSERTING %s\n", mvcckey)
 
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))

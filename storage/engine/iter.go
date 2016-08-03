@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/cockroachdb/cockroach/util/hlc"
 )
 
 var keyList = list.New()
@@ -25,25 +26,26 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool) ECSIterState {
 	getList(goToECSKey(SK), prefix, SK, debug)
 	for e := keyList.Front(); e != nil; e = e.Next() {
 		key := e.Value.(MVCCKey)
-		if prefix && !key.IsValue() {
-			//fmt.Println(key)
+		if (prefix || SK.IsValue()) && !key.IsValue() {
+			fmt.Println("skipping", key)
 			continue
 		}
 		if debug {
 			fmt.Println("comparing", SK, "to", key)
 		}
-		if(SK.Equal(key)) {	// || SK.Less2(key)) {
-			if debug {
-				fmt.Println("found", key)
+		if key.Key.StartsWith(SK.Key) {
+			secondaryECSIterState := secondaryECSIterSeek(key, SK.Timestamp, debug)
+			if !secondaryECSIterState.valid {
+				continue
 			}
-			return ECSIterState{
+			return secondaryECSIterState
+		}
+		if c := SK.Key.Compare(key.Key); c < 0 {		// c == 0 should have covered in case above
+			return ECSIterState{	// c < 0 i.e. SK < key
 				key:		key,
 				value:	[]byte("abc"),
 				valid:	true,
 			}
-		}
-		if key.Key.StartsWith(SK.Key) {
-			return secondaryECSIteratorSeek(key, debug)
 		}
 	}
 	return ECSIterState{
@@ -51,21 +53,21 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool) ECSIterState {
 	}
 }
 
-func secondaryECSIteratorSeek(SK MVCCKey, debug bool) ECSIterState {
+func secondaryECSIterSeek(prefixKey MVCCKey, seekKeyTS hlc.Timestamp, debug bool) ECSIterState {
 	newSK := MVCCKey{
-		Key:				SK.Key,
+		Key:				prefixKey.Key,
 		//Timestamp:	SK.Timestamp,
 	}
 	if debug {
 		fmt.Println("Sending new Key", newSK)
 	}
-	getList2(goToECSKey(newSK), true, SK, true)
+	getList2(goToECSKey(newSK), true, prefixKey, debug)
 	for e := keyList2.Back(); e != nil; e = e.Prev() {
 		key := e.Value.(MVCCKey)
 		if debug {
-			fmt.Println("SECONDARY comparing", newSK, "to", key)
+			fmt.Println("SECONDARY comparing", newSK, "to", key, seekKeyTS)
 		}
-		if(newSK.Timestamp.Less(key.Timestamp)) {
+		if(key.Timestamp.Less2(seekKeyTS)) {
 			if debug {
 				fmt.Println("SECONDARY found", key)
 			}
@@ -97,7 +99,7 @@ func getList2(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 		fmt.Println("error!!!", err.Error())
 		return
 	}
-	f, _ := os.OpenFile("log2", os.O_WRONLY, 0600)
+	f, _ := os.OpenFile("log2", os.O_APPEND | os.O_WRONLY, 0600)
 	defer f.Close()
 	s3Contents := output.Contents
 	keyList2.Init()
@@ -116,11 +118,14 @@ func getList2(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 				Key:       key,
 			}
 		}
-		_, _ = f.WriteString(mvccKey.String() + "\n")
-		f.Sync()
+			_, _ = f.WriteString(mvccKey.String() + "\n")
+			f.Sync()
 		keyList2.PushBack(mvccKey)
 	}
-		//fmt.Printf("Secondary : %d keys, key %s % x\n", keyList2.Len(), SK, prefixKey)
+	_, _ = f.WriteString("\n")
+	if(debug) {
+		fmt.Printf("Secondary : %d keys, key %s % x\n", keyList2.Len(), SK, prefixKey)
+	}
 }
 
 func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
@@ -144,16 +149,19 @@ func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 		fmt.Println("error!!!", err.Error())
 		return
 	}
-	f, _ := os.OpenFile("log", os.O_WRONLY, 0600)
+	f, _ := os.OpenFile("log", os.O_APPEND | os.O_WRONLY, 0600)
 	defer f.Close()
 	s3Contents := output.Contents
 	keyList.Init()
 	for _, s3Content := range s3Contents {
 		key, _ := hex.DecodeString(*s3Content.Key)
 		var mvccKey MVCCKey
-		if(len(key) > 12) {
-			keybuf := key[:len(key)-12]
-			ts := TSinGo2(key[len(key)-12:])
+		l := len(key)
+		if(l > 12) {
+			//keybuf := make([]byte, l, l+1)
+			keybuf := key[:l-12]
+			//copy(keybuf, key[:l-12])
+			ts := TSinGo2(key[l-12:])
 			mvccKey = MVCCKey{
 				Key:       keybuf,
 				Timestamp : ts,
@@ -167,6 +175,7 @@ func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 		f.Sync()
 		keyList.PushBack(mvccKey)
 	}
+	_, _ = f.WriteString("\n")
 	if(debug) {
 		fmt.Printf("%d keys, prefix %v, key %s % x\n", keyList.Len(), prefix, SK, prefixKey)
 	}

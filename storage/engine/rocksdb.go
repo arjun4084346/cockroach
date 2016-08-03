@@ -20,7 +20,6 @@
 package engine
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -47,6 +46,7 @@ import (
 
 	"strings"
 	"encoding/binary"
+	"bytes"
 )
 
 // #cgo darwin LDFLAGS: -Wl,-undefined -Wl,dynamic_lookup
@@ -376,7 +376,6 @@ func (r *RocksDB) Attrs() roachpb.Attributes {
 // The key and value byte slices may be reused safely. put takes a copy of
 // them before returning.
 func (r *RocksDB) Put(key MVCCKey, value []byte) error {
-	//fmt.Println("ever called? ", key, value)
 	return dbPut(r.rdb, key, value)
 }
 
@@ -401,7 +400,6 @@ func (r *RocksDB) ApplyBatchRepr(repr []byte) error {
 
 // Get returns the value for the given key.
 func (r *RocksDB) Get(key MVCCKey) ([]byte, error) {
-	//fmt.Println("ever called2? ", key)
 	return dbGet(r.rdb, key)
 }
 
@@ -962,6 +960,7 @@ type rocksDBIterator struct {
 	ECSValue	[]byte
 	ECSvalid  bool
 	prefix 		bool
+	replace		bool
 }
 
 // TODO(peter): Is this pool useful now that rocksDBBatch.NewIterator doesn't
@@ -983,14 +982,13 @@ func newRocksDBIterator(rdb *C.DBEngine, prefix bool, engine Reader) Iterator {
 	// as well.
 	r := iterPool.Get().(*rocksDBIterator)
 	r.init(rdb, prefix, engine)
-	r.prefix = prefix
-	//fmt.Println("Iterator created with perfix", prefix)
 	return r
 }
 
 func (r *rocksDBIterator) init(rdb *C.DBEngine, prefix bool, engine Reader) {
 	r.iter = C.DBNewIter(rdb, C.bool(prefix))
 	r.engine = engine
+	r.replace = false
 }
 
 func (r *rocksDBIterator) checkEngineOpen() {
@@ -1015,56 +1013,72 @@ func (r *rocksDBIterator) Close() {
 
 func (r *rocksDBIterator) Seek(key MVCCKey) {
 	r.checkEngineOpen()
-	/*if(qualifiedKey(key.String())) {
-		fmt.Println("called 1 for  ", key)
-	}*/
 	if len(key.Key) == 0 {
 		// start=Key("") needs special treatment since we need
 		// to access start[0] in an explicit seek.
-		r.setState(C.DBIterSeekToFirst(r.iter))
+		r.setState(C.DBIterSeekToFirst(r.iter))		// not yet implemented ECSIterSeekToFirst  -Arjun
 	} else {
 		// We can avoid seeking if we're already at the key we seek.
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
+			fmt.Println("are we coming here !!!")
 			return
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
-			r.setECSState(ECSIterSeek(key, r.prefix, false))
-			if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {
+			r.setECSState(ECSIterSeek(key, r.prefix, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+			if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
+				//((r.Key().Key.Compare(r.getECSKey().Key)==0)&&(!r.Key().IsValue()))) {		//ignore contradicting info for now!! :(
 				//fmt.Printf(".")
-			} else
-			if(strings.Compare(key.String(), "/Table/-9223372036854775808") != 0) {
-				fmt.Println("\nSEEKED KEY WAS", key, r.prefix)
-				if(
-						strings.Compare(key.String(), "/Table/3/1/13/1/2")==0 ||
-						strings.Compare(key.String(), "/Table/2/1/0/\"system\"/3/1")==0 ||
-						strings.Compare(key.String(), "/Table/2/1/1/\"rangelog\"/3/1")==0 ||
-						strings.Compare(key.String(), "/Table/2/1/1/\"eventlog\"/3/1")==0 ||
-						strings.Compare(key.String(), "/Table/3/1/1/2/1")==0) {
+				r.replace = true
+			} else {
+					if (!r.valid && !r.ECSvalid) {
+						fmt.Printf("both valids are false, relax. \nkey %skey %s\n", r.getECSKey(), r.Key())
+					} else {
+						if (strings.Compare(key.String(), "/Table/-9223372036854775808") != 0) {
+							fmt.Println("\nSEEKED KEY WAS", key, r.prefix)
+							/*if (
+									strings.Compare(key.String(), "/Table/3/1/13/1/2") == 0 ||
+									strings.Compare(key.String(), "/Table/2/1/0/\"system\"/3/1") == 0 ||
+									strings.Compare(key.String(), "/Table/2/1/1/\"rangelog\"/3/1") == 0 ||
+									strings.Compare(key.String(), "/Table/2/1/1/\"eventlog\"/3/1") == 0 ||
+									strings.Compare(key.String(), "/Table/3/1/1/2/1") == 0 ||
+									strings.Compare(key.String(), "/Table/2/1/0/\"bank\"/3/1") == 0) {
 
-					r.setECSState(ECSIterSeek(key, r.prefix, true))
+								r.setECSState(ECSIterSeek(key, r.prefix, true))
+							}*/
+							//fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey())
+							fmt.Printf("--% x--%d-%d-\n", r.Key().Key, r.Key().Timestamp.WallTime, r.Key().Timestamp.Logical)
+							fmt.Printf("--% x--%d-%d-\n", r.getECSKey().Key, r.getECSKey().Timestamp.WallTime, r.getECSKey().Timestamp.Logical)
+							/*if (strings.Compare(key.String(), "/Table/2/1/0/\"bank\"/3/1") == 0) {
+								if r.valid {
+									r.Next()
+									fmt.Println("Curr key", r.Key())
+									r.Next()
+									fmt.Println("Next key", r.Key())
+									*//*var aaa []byte
+									aaa[4] = 1*//*
+								} else {
+									fmt.Printf("IT IS NOT VALID!! prefix is %v\n", r.prefix)
+								}
+							}*/
+						}
 				}
-				fmt.Printf("--%s--%s--\n", r.Key(), r.getECSKey())
-				/*r.Prev()
-				fmt.Println("Prev key", r.Key())
-				if(strings.Compare(r.Key().String(), "/Min") != 0) {
-					r.Next()
-					fmt.Println("Curr key", r.Key())
-					r.Next()
-					fmt.Println("Next key", r.Key())
-				}*/
 			}
+		} else {
+			r.replace = false
 		}
 	}
 }
 
 func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
+	r.replace = false
 	r.checkEngineOpen()
 	if len(key.Key) == 0 {
 		r.setState(C.DBIterSeekToLast(r.iter))
 	} else {
 		// We can avoid seeking if we're already at the key we seek.
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
+			fmt.Println("then here?")
 			return
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
@@ -1118,9 +1132,6 @@ func (r *rocksDBIterator) Key() MVCCKey {
 }
 
 func (r *rocksDBIterator) getECSKey() MVCCKey {
-	// The data returned by rocksdb_iter_{key,value} is not meant to be
-	// freed by the client. It is a direct reference to the data managed
-	// by the iterator, so it is copied instead of freed.
 	return r.ECSKey
 }
 
@@ -1129,7 +1140,14 @@ func (r *rocksDBIterator) Value() []byte {
 }
 
 func (r *rocksDBIterator) getECSValue() []byte {
-	return r.ECSValue
+	ECSKey := goToECSKey(r.ECSKey)
+	data, err := getObject(ECSKey)
+	if(err == nil) {
+		return data
+	} else {
+		fmt.Printf("* Key %s not found in ECS.\n", r.ECSKey.String())
+	}
+	return nil
 }
 
 func (r *rocksDBIterator) ValueProto(msg proto.Message) error {
@@ -1160,11 +1178,13 @@ func (r *rocksDBIterator) setState(state C.DBIterState) {
 	r.reseek = false
 	r.key = state.key
 	r.value = state.value
+	r.replace = false
 }
 
 func (r *rocksDBIterator) setECSState(state ECSIterState) {
 	r.ECSvalid = state.valid
-	//r.reseek = false			//fix this. set this also, understand the significance!! -Arjun
+	//r.reseek = false			// fix this. set this also, understand the significance!! -Arjun
+												// update : maybe used to re-seek using the same iter, it should be set to false in that case. -Arjun
 	r.ECSKey = state.key
 	r.ECSValue = state.value
 }
@@ -1235,6 +1255,7 @@ func goToECSKey(key MVCCKey) []byte {
 		return keybytes
 	}
 }
+
 func TSinGo(ts hlc.Timestamp) []byte {
 	var b []byte
 	b = make([]byte, 12, 13)
@@ -1298,8 +1319,6 @@ func TSinGo2(ts []byte) hlc.Timestamp {
 		}
 	return timeStamp
 }
-
-
 
 func cToGoKey(key C.DBKey) MVCCKey {
 	// When converting a C.DBKey to an MVCCKey, give the underlying slice an

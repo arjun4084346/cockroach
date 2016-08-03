@@ -1392,6 +1392,9 @@ func MVCCDeleteRange(
 // Iterator.{Next,Prev,Seek,SeekReverse,Close}.
 func getScanMeta(iter Iterator, encEndKey MVCCKey, meta *enginepb.MVCCMetadata) (MVCCKey, error) {
 	metaKey := iter.unsafeKey()
+	if qualifiedIter(iter) {
+		metaKey = iter.(*rocksDBIterator).getECSKey()
+	}
 	if !metaKey.Less(encEndKey) {
 		return NilKey, iter.Error()
 	}
@@ -1404,6 +1407,10 @@ func getScanMeta(iter Iterator, encEndKey MVCCKey, meta *enginepb.MVCCMetadata) 
 		meta.KeyBytes = mvccVersionTimestampSize
 		meta.ValBytes = int64(len(iter.unsafeValue()))
 		meta.Deleted = len(iter.unsafeValue()) == 0
+		if qualifiedKey(metaKey.String()) && qualifiedIter(iter) {
+			meta.ValBytes = int64(len(iter.(*rocksDBIterator).getECSValue()))
+			meta.Deleted = len(iter.(*rocksDBIterator).getECSValue()) == 0
+		}
 		return metaKey, nil
 	}
 	if err := iter.ValueProto(meta); err != nil {
@@ -1418,6 +1425,9 @@ func getScanMeta(iter Iterator, encEndKey MVCCKey, meta *enginepb.MVCCMetadata) 
 // Iterator.{Next,Prev,Seek,SeekReverse,Close}.
 func getReverseScanMeta(iter Iterator, encEndKey MVCCKey, meta *enginepb.MVCCMetadata) (MVCCKey, error) {
 	metaKey := iter.unsafeKey()
+	if qualifiedIter(iter) {
+		metaKey = iter.(*rocksDBIterator).getECSKey()
+	}
 	// The metaKey < encEndKey is exceeding the boundary.
 	if metaKey.Less(encEndKey) {
 		return NilKey, iter.Error()
@@ -1429,6 +1439,7 @@ func getReverseScanMeta(iter Iterator, encEndKey MVCCKey, meta *enginepb.MVCCMet
 	if metaKey.IsValue() {
 		// Need a "safe" key because we're seeking the iterator.
 		metaKey = iter.Key()
+
 		// The row with oldest version will be got by seeking reversely. We use the
 		// key of this row to get the MVCC metadata key.
 		iter.Seek(MakeMVCCMetadataKey(metaKey.Key))
@@ -1989,6 +2000,9 @@ func MVCCResolveWriteIntentRangeUsingIter(
 		// Manually copy the underlying bytes of the unsafe key. This construction
 		// reuses keyBuf across iterations.
 		key := iterAndBuf.iter.unsafeKey()
+		if qualifiedIter(iterAndBuf.iter) {
+			key = iterAndBuf.iter.(*rocksDBIterator).getECSKey()
+		}
 		keyBuf = append(keyBuf[:0], key.Key...)
 		key.Key = keyBuf
 
@@ -2040,6 +2054,9 @@ func MVCCGarbageCollect(
 		}
 		inlinedValue := meta.IsInline()
 		implicitMeta := iter.unsafeKey().IsValue()
+		if qualifiedIter(iter) {
+			implicitMeta = iter.(*rocksDBIterator).getECSKey().IsValue()
+		}
 		// First, check whether all values of the key are being deleted.
 		if !gcKey.Timestamp.Less(meta.Timestamp) {
 			// For version keys, don't allow GC'ing the meta key if it's
@@ -2062,7 +2079,11 @@ func MVCCGarbageCollect(
 				}
 			}
 			if !implicitMeta {
-				if err := engine.Clear(iter.unsafeKey()); err != nil {
+				clearKey := iter.unsafeKey()
+				if qualifiedIter(iter) {
+					clearKey = iter.(*rocksDBIterator).getECSKey()
+				}
+				if err := engine.Clear(clearKey); err != nil {
 					return err
 				}
 			}

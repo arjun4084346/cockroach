@@ -37,16 +37,6 @@ func (t Timestamp) Less(s Timestamp) bool {
 	return t.WallTime < s.WallTime || (t.WallTime == s.WallTime && t.Logical < s.Logical)
 }
 
-func (t Timestamp) Less2(s Timestamp) bool {
-	if s == ZeroTimestamp {
-		return true
-	}
-	if t == ZeroTimestamp {
-		return false
-	}
-	return t.WallTime < s.WallTime || (t.WallTime == s.WallTime && t.Logical < s.Logical)
-}
-
 // Equal returns whether two timestamps are the same.
 func (t Timestamp) Equal(s Timestamp) bool {
 	return t.WallTime == s.WallTime && t.Logical == s.Logical
@@ -54,13 +44,6 @@ func (t Timestamp) Equal(s Timestamp) bool {
 
 func (t Timestamp) String() string {
 	return fmt.Sprintf("%d.%09d,%d", t.WallTime/1E9, t.WallTime%1E9, t.Logical)
-}
-
-func (t Timestamp) StringWithoutDot() string {
-	// How String() ensures that t.Walltime/1E9 is of 10 digit!!
-	// if it is shorter it can create problem in iterator operations
-	// -Arjun
-	return fmt.Sprintf("%d,%d", t.WallTime, t.Logical)		//IMPORTANT, SHOULD IT BE %19d ?? because otherwise that may screw the sorting, that also goes with every table/column index id too!!! OMG :(
 }
 
 // Add returns a timestamp with the WallTime and Logical components increased.

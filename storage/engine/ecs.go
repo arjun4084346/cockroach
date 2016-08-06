@@ -25,7 +25,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"bytes"
-	"reflect"
 )
 
 // Defining constants here.
@@ -35,7 +34,7 @@ import (
 // KV_MAP is a Golang map, used as a in-mem primitive cache
 
 var BUCKET string = "b1"
-const ENDPOINT string = "http://10.247.78.217:9020"
+const ENDPOINT string = "http://10.247.78.171:9020"
 var KV_MAP = map[string][]byte{}
 
 // RocksDB->ECS change could not be tested on all the KV data.
@@ -62,7 +61,7 @@ func qualifiedKey(keyStr string) bool {
 // engine.rocksDBIterator.replace is true, true signifies that the iterator holds
 // the data fetched from ECS, and can be used by getECSKey() getECSValue() functions
 func qualifiedIter(iter Iterator) bool {
-	if (strings.Compare(reflect.TypeOf(iter).String(),	"*engine.rocksDBIterator") == 0) && iter.(*rocksDBIterator).replace {
+	if iter.(*rocksDBIterator).replace && iter.(*rocksDBIterator).ECSvalid {	//ecsvalid not required coz replace is getting reset everyime needed
 		return true
 	}
 	return false
@@ -100,7 +99,7 @@ func getObject(key []byte) ([]byte, error){
 	}
 }
 
-// function no longer used
+// deleteObject deletes the ECS object identified by mvcckey
 func deleteObject(key []byte, mvcckey MVCCKey) string {
 	fmt.Printf("DELETING %s\n", mvcckey)
 	keyStr := hex.EncodeToString(key)
@@ -121,10 +120,6 @@ func deleteObject(key []byte, mvcckey MVCCKey) string {
 // value is also stored in the KV_MAP
 func createObject(key []byte, value []byte, mvcckey MVCCKey) string{
 	keyStr := hex.EncodeToString(key)
-	/*if(len(value) == 0) {								// Caution: This might be the wrong way to identify keys to remove. in case of secondary indexes, keys have NULL values.
-																				// need to check the difference
-		return deleteObject(key, mvcckey)		// Update : Maybe the old KV pair is deleted from rocks, but this KV (with blank V) is to be inserted, use "debug keys" to confirm
-	}*/
 	fmt.Printf("INSERTING %s\n", mvcckey)
 
 	sess := session.New()

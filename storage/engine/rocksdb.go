@@ -1004,9 +1004,6 @@ func (r *rocksDBIterator) destroy() {
 
 // The following methods implement the Iterator interface.
 func (r *rocksDBIterator) Close() {
-	/*fmt.Println("iterator closed!!")
-	fmt.Println()
-	fmt.Println()*/
 	r.destroy()
 	iterPool.Put(r)
 }
@@ -1024,11 +1021,20 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
-			r.setECSState(ECSIterSeek(key, r.prefix, false))		// Here goes my code to replace Rocks Iterator  -Arjun
-			if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
-				//((r.Key().Key.Compare(r.getECSKey().Key)==0)&&(!r.Key().IsValue()))) {		//ignore contradicting info for now!! :(
-				r.replace = true
-			}
+			if(false && strings.Compare(r.Key().Key.String(), "/Table/2/1/0/\"bank\"/3/1")==0) {
+				r.setECSState(ECSIterSeek(key, r.prefix, true, true, false))
+				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
+					//((r.Key().Key.Compare(r.getECSKey().Key)==0)&&(!r.Key().IsValue()))) {		//ignore contradicting info for now!! :(
+					r.replace = true
+					//fmt.Printf(".")
+				} else {
+					//fmt.Printf("Seeked - %s, % x, len %d, %v, %v %v\n", key, []byte(key.Key), len(key.Key), key.Timestamp.WallTime, key.Timestamp.Logical, r.prefix)
+					//fmt.Printf("rock   - %s, % x, len %d, %v, %v\n", r.Key(), []byte(r.Key().Key), len(r.Key().Key), r.Key().Timestamp.WallTime, r.Key().Timestamp.Logical)
+					//fmt.Printf("ecs    - %s, % x, len %d, %v, %v\n\n", r.getECSKey(), []byte(r.getECSKey().Key), len(r.getECSKey().Key), r.getECSKey().Timestamp.WallTime, r.getECSKey().Timestamp.Logical)
+				}
+			}	else {
+				r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))
+			}	// Here goes my code to replace Rocks Iterator  -Arjun
 		} else {
 			r.replace = false
 		}
@@ -1039,19 +1045,26 @@ func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
 	r.replace = false
 	r.checkEngineOpen()
 	if len(key.Key) == 0 {
-		r.setState(C.DBIterSeekToLast(r.iter))
+		r.setState(C.DBIterSeekToLast(r.iter))		// not yet implemented ECSIterSeekToLast  -Arjun
 	} else {
 		// We can avoid seeking if we're already at the key we seek.
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
-			fmt.Println("then here?")
 			return
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		// Maybe the key sorts after the last key in RocksDB.
 		if !r.Valid() {
 			r.setState(C.DBIterSeekToLast(r.iter))
+			if(qualifiedKey(key.String())) {		//NOT IMPLEMENTED YET!!!
+				r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {
+					r.replace = true
+				}
+			} else {
+				r.replace = false
+			}
 		}
-		if !r.Valid() {
+		if !r.Valid() || (qualifiedKey(key.String()) && r.ECSvalid) {
 			return
 		}
 		// Make sure the current key is <= the provided key.
@@ -1071,28 +1084,103 @@ func (r *rocksDBIterator) ECSValid() bool {
 
 func (r *rocksDBIterator) Next() {
 	r.checkEngineOpen()
+	oldKey := r.Key()
 	r.setState(C.DBIterNext(r.iter, false /* !skip_current_key_versions */))
+	newKey := r.Key()
+	var keyNow MVCCKey
+	if qualifiedKey(oldKey.String()) && qualifiedKey(newKey.String()) {
+		r.setECSState(ECSIterNext(oldKey, false /* !skip_current_key_versions */))
+		keyNow = r.getECSKey()
+		if (r.getECSKey().Equal(r.Key()) || strings.Compare(keyNow.String(), newKey.String()) == 0) {
+			r.replace = true
+		} else {
+			r.replace = false
+			r.ECSvalid = false
+		}
+		if keyNow.Equal(newKey) {
+			r.replace = true
+		} else {
+			r.replace = false
+			//fmt.Printf("curr  key - %s\nrock next - %s\necs  next - %s\n\n", oldKey, newKey, keyNow)
+		}
+	}
 }
 
 func (r *rocksDBIterator) Prev() {
 	r.checkEngineOpen()
+	oldKey := r.Key()
 	r.setState(C.DBIterPrev(r.iter, false /* !skip_current_key_versions */))
+	newKey := r.Key()
+	var keyNow MVCCKey
+	if qualifiedKey(oldKey.String()) && qualifiedKey(newKey.String()) {
+		r.setECSState(ECSIterPrev(oldKey, false /* !skip_current_key_versions */))
+		keyNow = r.getECSKey()
+		if (r.getECSKey().Equal(r.Key()) || strings.Compare(keyNow.String(), newKey.String()) == 0) {
+			r.replace = true
+		} else {
+			r.replace = false
+			r.ECSvalid = false
+		}
+		if keyNow.Equal(newKey) {
+			r.replace = true
+		} else {
+			r.replace = false
+		}
+	}
 }
 
 func (r *rocksDBIterator) NextKey() {
 	r.checkEngineOpen()
+	oldKey := r.Key()
 	r.setState(C.DBIterNext(r.iter, true /* skip_current_key_versions */))
+	newKey := r.Key()
+	var keyNow MVCCKey
+	if qualifiedKey(oldKey.String()) && qualifiedKey(newKey.String()) {
+		r.setECSState(ECSIterNext(oldKey, true /* skip_current_key_versions */))
+		keyNow = r.getECSKey()
+		if (strings.Compare(keyNow.String(), newKey.String()) == 0 || r.getECSKey().Equal(r.Key())) {
+			r.replace = true
+			//fmt.Printf(".")
+		} else {
+			r.replace = false
+			r.ECSvalid = false
+			//fmt.Printf("curr  key - %s\nrock next - %s\necs  next - %s\n\n", oldKey, newKey, keyNow)
+		}
+	}
 }
 
 func (r *rocksDBIterator) PrevKey() {
 	r.checkEngineOpen()
+	oldKey := r.Key()
 	r.setState(C.DBIterPrev(r.iter, true /* skip_current_key_versions */))
+	newKey := r.Key()
+	var keyNow MVCCKey
+	if qualifiedKey(oldKey.String()) && qualifiedKey(newKey.String()) {
+		r.setECSState(ECSIterPrev(oldKey, true /* skip_current_key_versions */))
+		keyNow = r.getECSKey()
+		if (r.getECSKey().Equal(r.Key()) || strings.Compare(keyNow.String(), newKey.String()) == 0) {
+			r.replace = true
+		} else {
+			r.replace = false
+			r.ECSvalid = false
+		}
+		if keyNow.Equal(newKey) {
+			//fmt.Printf(".")
+			r.replace = true
+		} else {
+			r.replace = false
+			//fmt.Printf("curr  key - %s\nrock next - %s\necs  next - %s\n\n", oldKey, newKey, keyNow)
+		}
+	}
 }
 
 func (r *rocksDBIterator) Key() MVCCKey {
 	// The data returned by rocksdb_iter_{key,value} is not meant to be
 	// freed by the client. It is a direct reference to the data managed
 	// by the iterator, so it is copied instead of freed.
+	if qualifiedIter(r) {
+		return r.getECSKey()
+	}
 	return cToGoKey(r.key)
 }
 
@@ -1101,6 +1189,9 @@ func (r *rocksDBIterator) getECSKey() MVCCKey {
 }
 
 func (r *rocksDBIterator) Value() []byte {
+	if qualifiedIter(r) {
+		return r.getECSValue()
+	}
 	return cSliceToGoBytes(r.value)
 }
 
@@ -1123,10 +1214,16 @@ func (r *rocksDBIterator) ValueProto(msg proto.Message) error {
 }
 
 func (r *rocksDBIterator) unsafeKey() MVCCKey {
+	if qualifiedIter(r) {
+		return r.getECSKey()
+	}
 	return cToUnsafeGoKey(r.key)
 }
 
 func (r *rocksDBIterator) unsafeValue() []byte {
+	if qualifiedIter(r) {
+		return r.getECSValue()
+	}
 	return cSliceToUnsafeGoBytes(r.value)
 }
 
@@ -1199,25 +1296,34 @@ func goToCKey(key MVCCKey) C.DBKey {
 	}
 }
 
+// goToECSKey converts a go MVCC Key to []bytes, which will be used for ECS object name
 func goToECSKey(key MVCCKey) []byte {
 	l := len(key.Key)
-	keybytes := make([]byte, l, l+1)
-	keybytes = key.Key[0:l]
+	keybytes := make([]byte, l)
+	copy(keybytes, key.Key)
+	var fullkey []byte
+	time := putTimestamp(key.Timestamp)
+	fullkey = append(keybytes, time...)
+	return fullkey
+}
 
-	if key.Timestamp != hlc.ZeroTimestamp {
-		var fullkey []byte
-		time := putTimestamp(key.Timestamp)
-		fullkey = append(keybytes, time...)
-		return fullkey
-	} else {
-		return keybytes
+// ecsToGoKey converts a go MVCC Key to []bytes, which will be used for ECS object name
+func ecsToGoKey(key []byte) MVCCKey {
+	var mvccKey MVCCKey
+	l := len(key)
+	keybuf := key[:l-12]
+	ts := getTimestamp(key[l-12:])
+	mvccKey = MVCCKey{
+		Key:       keybuf,
+		Timestamp : ts,
 	}
+	return mvccKey
 }
 
 // works like putUint64
 func putTimestamp(ts hlc.Timestamp) []byte {
 	var b []byte
-	b = make([]byte, 12, 13)
+	b = make([]byte, 12)
 	wt := ts.WallTime
 	lt := ts.Logical
 	b[0] = byte(wt >> 56)
@@ -1235,6 +1341,7 @@ func putTimestamp(ts hlc.Timestamp) []byte {
 	return b
 }
 
+// getTimestamp is reverse of putTimestamp
 func getTimestamp(ts []byte) hlc.Timestamp {
 	var wt int64
 	wtbuf := ts[:8]
@@ -1416,6 +1523,9 @@ func dbGetProto(rdb *C.DBEngine, key MVCCKey,
 func dbClear(rdb *C.DBEngine, key MVCCKey) error {
 	if len(key.Key) == 0 {
 		return emptyKeyError()
+	}
+	if qualifiedKey(key.String()) {
+		_ = deleteObject(goToECSKey(key), key)
 	}
 	return statusToError(C.DBDelete(rdb, goToCKey(key)))
 }

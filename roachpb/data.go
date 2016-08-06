@@ -174,20 +174,6 @@ func (k Key) Compare(b interval.Comparable) int {
 	return bytes.Compare(k, b.(Key))
 }
 
-func (k1 Key) StartsWith(k2 Key) bool {
-	l := len(k1)
-	if len(k2) < l {
-		l = len(k2)
-	}
-	for i := 0; i < l; i++ {
-		c1, c2 := k1[i], k2[i]
-		if c1 != c2 {
-			return false
-		}
-	}
-	return true
-}
-
 // String returns a string-formatted version of the key.
 func (k Key) String() string {
 	if PrettyPrintKey != nil {
@@ -195,17 +181,6 @@ func (k Key) String() string {
 	}
 
 	return fmt.Sprintf("%q", []byte(k))
-}
-
-func (k Key) StringWithoutQuote() string {
-	// implement PrettyPrintWithoutQuote in printer.go
-	// might be not required, have to check!!
-	// -Arjun
-	/*if PrettyPrintKey != nil {
-		return PrettyPrintKey(k)
-	}*/
-
-	return fmt.Sprintf("%s", []byte(k))
 }
 
 // Format implements the fmt.Formatter interface.

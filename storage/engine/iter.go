@@ -38,109 +38,245 @@ type ECSIterState struct {
 	valid	bool
 }
 
+func ECSIterPrev(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
+	newKey := make([]byte, len(SK.Key))
+	newTimestamp := SK.Timestamp
+	copy(newKey, SK.Key)
+
+	if l := len(SK.Key); l == 0 {			// Why sometimes SK.Key is null!! -Arjun
+		return ECSIterState{valid:false}
+	}
+	if skip_current_key_versions {
+		newKey[len(newKey)-1] = newKey[len(newKey)-1] - 1
+	} else {
+		newTimestamp = newTimestamp.Next()
+	}
+	newSK := MVCCKey{
+		Key 			: newKey,
+		Timestamp	: newTimestamp,
+	}
+	return ECSIterSeekReverse(newSK, false, false, false, skip_current_key_versions)
+}
+
+func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
+	debug := false
+	newKey := make([]byte, len(SK.Key))
+	newTimestamp := SK.Timestamp
+	copy(newKey, SK.Key)
+
+	if l := len(SK.Key); l == 0 {			// Why sometimes SK.Key is null!! -Arjun
+		return ECSIterState{valid:false}
+	}
+	if skip_current_key_versions {
+		newKey[len(newKey)-1] = newKey[len(newKey)-1] + 1
+	} else {
+		newTimestamp = newTimestamp.Prev()
+	}
+	newSK := MVCCKey{
+		Key 			: newKey,
+		Timestamp	: newTimestamp,
+	}
+	return ECSIterSeek(newSK, false, debug, false, skip_current_key_versions)
+}
+
+func ECSIterSeekReverse(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekFirst bool) ECSIterState {
+	if reGetList {
+		getList(goToECSKey(SK), prefix, SK, debug)
+	}
+	for e := keyList.Back(); e != nil; e = e.Prev() {
+		key := e.Value.(MVCCKey)
+		if (prefix || SK.IsValue()) && !key.IsValue() {
+			// It is observed that when prefix is true in the cockroach iterator or when search key
+			// has timestamp, key without timestamp is not where iterator seeks to. Though I have not
+			// read this anywhere in documentation. -Arjun
+			// CHECK IF THIS RULE APPLICABLE IN REVERSE,NEXT,PREV AS WELL!! CANNOT, AS SEEKREVERSE DONT EVER EXECUTE !!
+			continue
+		}
+		var c int
+		if c = SK.Key.Compare(key.Key); c < 0 {
+			continue
+		}
+		var keyChanged bool
+		if c == 0 {
+			keyChanged = false
+		} else {
+			keyChanged = true
+		}
+		var effectiveSKTS hlc.Timestamp
+		if keyChanged {
+			effectiveSKTS = hlc.ZeroTimestamp
+		} else {
+			effectiveSKTS = SK.Timestamp
+			if SK.Timestamp == hlc.ZeroTimestamp {
+				effectiveSKTS = hlc.MaxTimestamp
+			}
+		}
+		oldkey := MVCCKey{Key:key.Key, Timestamp:key.Timestamp}
+		maxDiffTS := hlc.MaxTimestamp
+		var currDiff hlc.Timestamp
+		for ; e != nil; e = e.Prev() {
+			key = e.Value.(MVCCKey)
+			if key.Key.Compare(oldkey.Key) != 0 {
+				break
+			}
+			if keyChanged {
+				currDiff = hlc.Timestamp{
+					WallTime  :  key.Timestamp.WallTime - effectiveSKTS.WallTime,
+					Logical   :  key.Timestamp.Logical - effectiveSKTS.Logical,
+				}
+				if currDiff.Less(maxDiffTS) {
+					//we want min diff, lowest timestamp key
+					maxDiffTS = currDiff
+					oldkey = key
+				}
+			} else {
+				if effectiveSKTS.Less(key.Timestamp) || effectiveSKTS.Equal(key.Timestamp) {
+					currDiff = hlc.Timestamp{
+						WallTime  : key.Timestamp.WallTime - effectiveSKTS.WallTime,
+						Logical   : key.Timestamp.Logical - effectiveSKTS.Logical,
+					}
+					if currDiff.Less(maxDiffTS) {
+						maxDiffTS = currDiff
+						oldkey = key
+					}
+				}
+			}
+		}
+		return ECSIterState{
+			key:    oldkey,
+			valid:  true,
+		}
+	}
+	return ECSIterState{
+		valid:	false,
+	}
+}
+
 // This is the main replacement of C.DBIterSeek()
 // SK 		- key being seeked
 // prefix - when prefix is true, only keys with SK.key as a prefix are searched in ECS
 // debug	- this is just for debugging purpose, can be safely removed
-func ECSIterSeek(SK MVCCKey, prefix bool, debug bool) ECSIterState {
-	getList(goToECSKey(SK), prefix, SK, debug)
+func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast bool) ECSIterState {
+	if reGetList {
+		getList(goToECSKey(SK), prefix, SK, debug)
+	}
+	if debug {
+		fmt.Println("seeked", SK)
+	}
 	for e := keyList.Front(); e != nil; e = e.Next() {
 		key := e.Value.(MVCCKey)
 		if (prefix || SK.IsValue()) && !key.IsValue() {		// It is observed that when prefix is true in the cockroach iterator or when search key
 																											// has timestamp, key without timestamp is not where iterator seeks to. Though I have not
 																											// read this anywhere in documentation. -Arjun
-			fmt.Println("skipping", key)
+			//fmt.Println("skipping", key)
 			continue
 		}
 		if debug {
 			fmt.Println("comparing", SK, "to", key)
 		}
-		if key.Key.StartsWith(SK.Key) {		// uses secondaryECSIterSeek() to find the correct timestamp'ed key for a particular user-key
-			secondaryECSIterState := secondaryECSIterSeek(key, SK.Timestamp, debug)
-			if !secondaryECSIterState.valid {
-				continue
-			}
-			return secondaryECSIterState
+		var c int
+		if c = SK.Key.Compare(key.Key); c > 0 {
+			continue
 		}
-		if c := SK.Key.Compare(key.Key); c < 0 {		// c == 0 should have been covered in case above
-			return ECSIterState{											// c < 0 i.e. SK < key
-				key:		key,
-				valid:	true,
-			}
-		}
-	}
-	return ECSIterState{
-		valid:	false,
-	}
-}
-
-// timestamped are sorted in reverse order in ECS. secondaryECSIterSeek search for the correct key in reverse order
-// prefixKey	- MVCC Key used for prefix matching; actually only the MVCC.key is needed, but complete key is passed for debugging
-// seekKeyTS	- time stamp of the MVCC key originally seeked for
-// debug			- this is just for debugging purpose, can be safely removed
-func secondaryECSIterSeek(prefixKey MVCCKey, seekKeyTS hlc.Timestamp, debug bool) ECSIterState {
-	newSK := MakeMVCCMetadataKey(prefixKey.Key)
-	if debug {
-		fmt.Println("Sending new Key", newSK)
-	}
-	getListCommonKey(goToECSKey(newSK), true, prefixKey, debug)
-	for e := keyListCommonKey.Back(); e != nil; e = e.Prev() {
-		key := e.Value.(MVCCKey)
-		if debug {
-			fmt.Println("SECONDARY comparing", newSK, "to", key, seekKeyTS)
-		}
-		if(key.Timestamp.Less2(seekKeyTS)) {
+		var keyChanged bool
+		if c==0 {
+			keyChanged = false
 			if debug {
-				fmt.Println("SECONDARY found", key)
-			}
-			return ECSIterState{
-				key:		key,
-				valid:	true,
-			}
-		}
-	}
-	return ECSIterState{
-		valid:	false,
-	}
-}
-
-// getListCommonKey is same as getList
-func getListCommonKey(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
-	keyStr := hex.EncodeToString(prefixKey)
-	sess := session.New()
-	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
-	var output *s3.ListObjectsOutput
-	var err error
-		output, err = svc.ListObjects(&s3.ListObjectsInput{
-			Bucket: aws.String(BUCKET),
-			Prefix: aws.String(keyStr),
-		})
-
-	if err != nil {
-		fmt.Println("error!!!", err.Error())
-		return
-	}
-	s3Contents := output.Contents
-	keyListCommonKey.Init()
-	for _, s3Content := range s3Contents {
-		key, _ := hex.DecodeString(*s3Content.Key)
-		var mvccKey MVCCKey
-		if(len(key) > 12) {
-			keybuf := key[:len(key)-12]
-			ts := getTimestamp(key[len(key)-12:])
-			mvccKey = MVCCKey{
-				Key:       keybuf,
-				Timestamp : ts,
+				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
 			}
 		} else {
-			mvccKey = MVCCKey{
-				Key:       key,
+			keyChanged = true
+			if debug {
+				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
 			}
 		}
-		keyListCommonKey.PushBack(mvccKey)
+		if false && keyChanged {
+			if !key.IsValue() {
+				if debug {
+					fmt.Println("returning through new protocol", key)
+				}
+				return ECSIterState{
+					key:		key,
+					valid:	true,
+				}
+			}
+		}
+		var effectiveSKTS hlc.Timestamp
+		if keyChanged {
+			effectiveSKTS = hlc.ZeroTimestamp
+		} else {
+			effectiveSKTS = SK.Timestamp
+			if SK.Timestamp==hlc.ZeroTimestamp {
+				effectiveSKTS = hlc.MaxTimestamp
+			}
+		}
+		oldkey := MVCCKey{Key:key.Key, Timestamp:key.Timestamp}
+		if debug {
+			fmt.Println("key set to", oldkey)
+		}
+		minDiffTS := hlc.ZeroTimestamp
+		maxDiffTS := hlc.MaxTimestamp
+		var currDiff hlc.Timestamp
+		for ; e != nil; e = e.Next() {
+			key = e.Value.(MVCCKey)
+			if key.Key.Compare(oldkey.Key) != 0 {
+				break
+			}
+			if debug {
+				fmt.Println("comparing with", key)
+			}
+			if keyChanged {
+				if debug {
+					fmt.Println("considering1", key, SK.Timestamp.WallTime)
+				}
+				currDiff = hlc.Timestamp {
+					WallTime	:	key.Timestamp.WallTime - effectiveSKTS.WallTime,
+					Logical		:	key.Timestamp.Logical - effectiveSKTS.Logical,
+				}
+				if !currDiff.Less(minDiffTS) {	//we want max diff, biggest timestamp key
+					minDiffTS = currDiff
+					oldkey = key
+					if debug {
+						fmt.Println("accepted for now1", key)
+					}
+				}
+			} else {
+				/*tschanged := false
+					if key.Timestamp==hlc.ZeroTimestamp {
+						tschanged = true
+						key.Timestamp = hlc.MaxTimestamp
+					}*/
+					if key.Timestamp.Less(effectiveSKTS) || effectiveSKTS.Equal(key.Timestamp){
+						if debug {
+							fmt.Println("considering2", key, SK.Timestamp.WallTime)
+						}
+						currDiff = hlc.Timestamp {
+							WallTime	:	effectiveSKTS.WallTime-key.Timestamp.WallTime,
+							Logical		:	effectiveSKTS.Logical-key.Timestamp.Logical,
+						}
+						if currDiff.Less(maxDiffTS) {
+							maxDiffTS = currDiff
+							oldkey = key
+							/*if tschanged {
+								oldkey.Timestamp = hlc.ZeroTimestamp
+							}*/
+							if debug {
+								fmt.Println("accepted for now2", key)
+							}
+						}
+					}
+			}
+		}
+		if debug {
+			fmt.Println("returning", oldkey)
+		}
+		return ECSIterState{
+			key:		oldkey,
+			valid:	true,
+		}
 	}
-	if(debug) {
-		fmt.Printf("Secondary : %d keys, key %s % x\n", keyListCommonKey.Len(), SK, prefixKey)
+	return ECSIterState{
+		valid:	false,
 	}
 }
 
@@ -164,7 +300,6 @@ func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 			Bucket: aws.String(BUCKET),
 		})
 	}
-
 	if err != nil {
 		fmt.Println("error!!!", err.Error())
 		return
@@ -173,23 +308,6 @@ func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 	keyList.Init()
 	for _, s3Content := range s3Contents {
 		key, _ := hex.DecodeString(*s3Content.Key)
-		var mvccKey MVCCKey
-		l := len(key)
-		if(l > 12) {
-			keybuf := key[:l-12]
-			ts := getTimestamp(key[l-12:])
-			mvccKey = MVCCKey{
-				Key:       keybuf,
-				Timestamp : ts,
-			}
-		} else {
-			mvccKey = MVCCKey{
-				Key:       key,
-			}
-		}
-		keyList.PushBack(mvccKey)
-	}
-	if(debug) {
-		fmt.Printf("%d keys, prefix %v, key %s % x\n", keyList.Len(), prefix, SK, prefixKey)
+		keyList.PushBack(ecsToGoKey(key))
 	}
 }

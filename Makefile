@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-#
+#coc
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
@@ -193,7 +193,7 @@ check:
 
 .PHONY: clean
 clean:
-	$(GO) clean $(GOFLAGS) -i github.com/cockroachdb/...
+	$(GO) clean $(GOFLAGS) -i github.com/arjun4084346/...
 	find . -name '*.test' -type f -exec rm -f {} \;
 	rm -f .bootstrap
 	make -C ui clean

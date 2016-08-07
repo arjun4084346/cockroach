@@ -29,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/kr/pretty"
 
 	"github.com/cockroachdb/cockroach/util/caller"
@@ -87,10 +89,10 @@ func contains(s Severity, str string, t *testing.T) bool {
 	return strings.Contains(c, str)
 }
 
-// setFlags configures the logging flags and osExitFunc how the test expects
+// setFlags configures the logging flags and exitFunc how the test expects
 // them.
 func setFlags() {
-	osExitFunc = os.Exit
+	SetExitFunc(os.Exit)
 	logging.stderrThreshold = ErrorLog
 	logging.toStderr = false
 }
@@ -99,7 +101,7 @@ func setFlags() {
 func TestInfo(t *testing.T) {
 	setFlags()
 	defer logging.swap(logging.newBuffers())
-	Info("test")
+	Info(context.Background(), "test")
 	if !contains(InfoLog, "I", t) {
 		t.Errorf("Info has wrong character: %q", contents(InfoLog))
 	}
@@ -215,7 +217,7 @@ func TestEntryDecoder(t *testing.T) {
 func TestError(t *testing.T) {
 	setFlags()
 	defer logging.swap(logging.newBuffers())
-	Error("test")
+	Error(context.Background(), "test")
 	if !contains(ErrorLog, "E", t) {
 		t.Errorf("Error has wrong character: %q", contents(ErrorLog))
 	}
@@ -237,7 +239,7 @@ func TestError(t *testing.T) {
 func TestWarning(t *testing.T) {
 	setFlags()
 	defer logging.swap(logging.newBuffers())
-	Warning("test")
+	Warning(context.Background(), "test")
 	if !contains(WarningLog, "W", t) {
 		t.Errorf("Warning has wrong character: %q", contents(WarningLog))
 	}
@@ -257,7 +259,7 @@ func TestV(t *testing.T) {
 	_ = logging.verbosity.Set("2")
 	defer func() { _ = logging.verbosity.Set("0") }()
 	if v(2) {
-		addStructured(nil, InfoLog, 1, "", []interface{}{"test"})
+		addStructured(context.Background(), InfoLog, 1, "", []interface{}{"test"})
 	}
 	if !contains(InfoLog, "I", t) {
 		t.Errorf("Info has wrong character: %q", contents(InfoLog))
@@ -283,7 +285,7 @@ func TestVmoduleOn(t *testing.T) {
 		t.Error("V enabled for 3")
 	}
 	if v(2) {
-		addStructured(nil, InfoLog, 1, "", []interface{}{"test"})
+		addStructured(context.Background(), InfoLog, 1, "", []interface{}{"test"})
 	}
 	if !contains(InfoLog, "I", t) {
 		t.Errorf("Info has wrong character: %q", contents(InfoLog))
@@ -305,7 +307,7 @@ func TestVmoduleOff(t *testing.T) {
 		}
 	}
 	if v(2) {
-		addStructured(nil, InfoLog, 1, "", []interface{}{"test"})
+		addStructured(context.Background(), InfoLog, 1, "", []interface{}{"test"})
 	}
 	if contents(InfoLog) != "" {
 		t.Error("V logged incorrectly")
@@ -351,8 +353,8 @@ func TestVmoduleGlob(t *testing.T) {
 func TestListLogFiles(t *testing.T) {
 	setFlags()
 
-	Info("x")    // Be sure we have a file.
-	Warning("x") // Be sure we have a file.
+	Info(context.Background(), "x")    // Be sure we have a file.
+	Warning(context.Background(), "x") // Be sure we have a file.
 	var info, warn *syncBuffer
 	var ok bool
 	info, ok = logging.file[InfoLog].(*syncBuffer)
@@ -386,7 +388,7 @@ func TestListLogFiles(t *testing.T) {
 
 func TestGetLogReader(t *testing.T) {
 	setFlags()
-	Warning("x")
+	Warning(context.Background(), "x")
 	warn, ok := logging.file[WarningLog].(*syncBuffer)
 	if !ok {
 		t.Fatal("warning wasn't created")
@@ -471,7 +473,7 @@ func TestRollover(t *testing.T) {
 	defer func(previous uint64) { MaxSize = previous }(MaxSize)
 	MaxSize = 1024
 
-	Info("x") // Be sure we have a file.
+	Info(context.Background(), "x") // Be sure we have a file.
 	info, ok := logging.file[InfoLog].(*syncBuffer)
 	if !ok {
 		t.Fatal("info wasn't created")
@@ -480,7 +482,7 @@ func TestRollover(t *testing.T) {
 		t.Fatalf("info has initial error: %v", err)
 	}
 	fname0 := info.file.Name()
-	Info(strings.Repeat("x", int(MaxSize))) // force a rollover
+	Info(context.Background(), strings.Repeat("x", int(MaxSize))) // force a rollover
 	if err != nil {
 		t.Fatalf("info has error after big write: %v", err)
 	}
@@ -493,7 +495,7 @@ func TestRollover(t *testing.T) {
 	// handle Daylight Savings Time properly).
 	time.Sleep(1 * time.Second)
 
-	Info("x") // create a new file
+	Info(context.Background(), "x") // create a new file
 	if err != nil {
 		t.Fatalf("error after rotation: %v", err)
 	}
@@ -524,7 +526,7 @@ func TestLogBacktraceAt(t *testing.T) {
 		// Start of tracing block. These lines know about each other's relative position.
 		file, line, _ := caller.Lookup(0)
 		setTraceLocation(file, line, +2) // Two lines between Caller and Info calls.
-		Info("we want a stack trace here")
+		Info(context.Background(), "we want a stack trace here")
 		if err := logging.traceLocation.Set(""); err != nil {
 			t.Fatal(err)
 		}
@@ -552,14 +554,14 @@ func TestFatalStacktraceStderr(t *testing.T) {
 	setFlags()
 	logging.stderrThreshold = NumSeverity
 	logging.toStderr = false
-	osExitFunc = func(int) {}
+	SetExitFunc(func(int) {})
 
 	defer setFlags()
 	defer logging.swap(logging.newBuffers())
 
 	for _, level := range []int{tracebackNone, tracebackSingle, tracebackAll} {
 		traceback = level
-		Fatalf("cinap")
+		Fatalf(context.Background(), "cinap")
 		cont := contents(FatalLog)
 		if !strings.Contains(cont, " cinap") {
 			t.Fatalf("panic output does not contain cinap:\n%s", cont)

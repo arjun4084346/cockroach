@@ -21,12 +21,13 @@ import "github.com/pkg/errors"
 func makeRouter(typ OutputRouterSpec_Type, streams []RowReceiver) (
 	RowReceiver, error,
 ) {
-	if len(streams) == 0 {
-		panic("no streams")
-	}
-	if len(streams) == 1 {
+	switch len(streams) {
+	case 0:
+		return nil, errors.Errorf("no streams in router")
+	case 1:
 		// Special passthrough case - no router.
 		return streams[0], nil
+	default:
+		return nil, errors.Errorf("router type %s not supported", typ)
 	}
-	return nil, errors.Errorf("router type %s not supported", typ)
 }

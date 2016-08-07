@@ -5,7 +5,13 @@ import { ToolTip } from "./toolTip";
 interface VisualizationProps {
   title: string;
   subtitle?: string;
-  tooltip?: string;
+  tooltip?: React.ReactNode;
+  // If warning or warningTitle exist, they are appended to the tooltip
+  // and the icon is changed to the warning icon.
+  warningTitle?: string;
+  warning?: React.ReactNode;
+  // If stale is true, the visualization is faded
+  // and the icon is changed to a warning icon.
   stale?: boolean;
 }
 
@@ -16,13 +22,13 @@ interface VisualizationProps {
  */
 export default class extends React.Component<VisualizationProps, {}> {
   render() {
-    let { title, tooltip, stale } = this.props;
+    let { title, tooltip, stale, warning, warningTitle } = this.props;
     let vizClasses = classNames({
       "visualization-wrapper": true,
       "viz-faded": stale || false,
     });
 
-    let icon = stale ? "warning" : "info";
+    let icon = (stale || warning || warningTitle) ? "warning" : "info";
 
     return <div className={vizClasses}>
       <div className="viz-top">
@@ -34,7 +40,7 @@ export default class extends React.Component<VisualizationProps, {}> {
         </div>
         {
           // Display tooltip if specified.
-          (tooltip) ? <ToolTip text={tooltip} title={title} /> : ""
+          (tooltip) ? <ToolTip text={tooltip} title={title} warning={warning} warningTitle={warningTitle} /> : ""
         }
       </div>
         { this.props.children }

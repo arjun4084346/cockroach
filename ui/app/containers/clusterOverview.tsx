@@ -46,13 +46,20 @@ class ClusterMain extends React.Component<ClusterMainProps, {}> {
 
   render() {
     let { totalNodes, bytesUsed, availableCapacity } = this.props.clusterInfo;
-    let capacityPercent = (availableCapacity !== 0) ? bytesUsed / availableCapacity : 0.0;
+    let capacityPercent = (availableCapacity !== 0) ? bytesUsed / (bytesUsed + availableCapacity) : 0.0;
     return <div className="section overview">
       <div className="charts half">
 
         <div style={{float:"left"}} className="small half">
-          <Visualization title={ (totalNodes === 1) ? "Node" : "Nodes" }
-                         tooltip="The total number of nodes in the cluster.">
+          <Visualization
+            title={ (totalNodes === 1) ? "Node" : "Nodes" }
+            tooltip="The total number of nodes in the cluster."
+            warning={ totalNodes < 3 ? <div>This cluster needs at least 3 nodes to tolerate failure.
+              <br />See the <a href="https://www.cockroachlabs.com/docs/configure-replication-zones.html" target="_blank">
+                docs
+              </a> for more details.</div> : ""
+            }
+            warningTitle = { totalNodes < 3 ? "Low Replication" : "" }>
             <div className="visualization">
               <div style={{zoom:"100%"}} className="number">{ d3.format("s")(totalNodes) }</div>
             </div>
@@ -74,7 +81,7 @@ class ClusterMain extends React.Component<ClusterMainProps, {}> {
                      subtitle="(Max Per Percentile)"
                      tooltip={`The latency between query requests and responses over a 1 minute period.
                                Percentiles are first calculated on each node.
-                               For Each percentile, the maximum latency across all nodes is then shown.`}>
+                               For each percentile, the maximum latency across all nodes is then shown.`}>
             <Axis format={ (n: number) => d3.format(".1f")(NanoToMilli(n)) } label="Milliseconds">
               <Metric name="cr.node.exec.latency-1m-max" title="Max Latency"
                       aggregateMax downsampleMax />
@@ -89,16 +96,16 @@ class ClusterMain extends React.Component<ClusterMainProps, {}> {
 
           <StackedAreaGraph title="CPU Usage"
                      legend={ false }
-                     tooltip={`The percentage of CPU used by CockroachDB (User %) and system-level operations
+                     tooltip={`The average percentage of CPU used by CockroachDB (User %) and system-level operations
                                (Sys %) across all nodes.`}>
             <Axis format={ d3.format(".2%") }>
-              <Metric name="cr.node.sys.cpu.user.percent" title="CPU User %" />
-              <Metric name="cr.node.sys.cpu.sys.percent" title="CPU Sys %" />
+              <Metric name="cr.node.sys.cpu.user.percent" aggregateAvg title="CPU User %" />
+              <Metric name="cr.node.sys.cpu.sys.percent" aggregateAvg title="CPU Sys %" />
             </Axis>
           </StackedAreaGraph>
 
           <LineGraph title="Memory Usage"
-                     tooltip="The memory in use across all nodes.">
+                     tooltip="The total memory in use across all nodes.">
             <Axis format={ Bytes }>
               <Metric name="cr.node.sys.rss" title="Memory" />
             </Axis>
@@ -109,30 +116,30 @@ class ClusterMain extends React.Component<ClusterMainProps, {}> {
         <GraphGroup groupId="cluster.big">
 
           <LineGraph title="SQL Connections"
-                     tooltip="The total number of active SQL connections to the cluster.">
-            <Axis format={ d3.format(".1") }>
+                     tooltip="The total number of active SQL connections across all nodes.">
+            <Axis format={ d3.format(".1f") }>
               <Metric name="cr.node.sql.conns" title="Connections" />
             </Axis>
           </LineGraph>
 
           <LineGraph title="SQL Traffic"
-                     tooltip="The amount of network traffic sent to and from the SQL system, in bytes.">
+                     tooltip="The average amount of SQL client network traffic in bytes per second across all nodes.">
             <Axis format={ Bytes }>
               <Metric name="cr.node.sql.bytesin" title="Bytes In" nonNegativeRate />
               <Metric name="cr.node.sql.inserts" title="Bytes Out" nonNegativeRate />
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Reads Per Second"
-                     tooltip="The number of SELECT statements, averaged over a 10 second period.">
-            <Axis format={ d3.format(".1") }>
+          <LineGraph title="Reads"
+                     tooltip="The average number of SELECT statements per second across all nodes.">
+            <Axis format={ d3.format(".1f") }>
               <Metric name="cr.node.sql.select.count" title="Selects" nonNegativeRate />
             </Axis>
           </LineGraph>
 
-          <LineGraph title="Writes Per Second"
-                     tooltip="The number of INSERT, UPDATE, and DELETE statements, averaged over a 10 second period.">
-            <Axis format={ d3.format(".1") }>
+          <LineGraph title="Writes"
+                     tooltip="The average number of INSERT, UPDATE, and DELETE statements per second across all nodes.">
+            <Axis format={ d3.format(".1f") }>
               <Metric name="cr.node.sql.insert.count" title="Insert" nonNegativeRate />
               <Metric name="cr.node.sql.update.count" title="Update" nonNegativeRate />
               <Metric name="cr.node.sql.delete.count" title="Delete" nonNegativeRate />
@@ -158,7 +165,7 @@ let clusterInfo = createSelector(
 );
 
 let clusterMainConnected = connect(
-  (state, ownProps) => {
+  (state: AdminUIState) => {
     return {
       clusterInfo: clusterInfo(state),
     };

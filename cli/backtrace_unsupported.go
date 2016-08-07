@@ -1,4 +1,4 @@
-// Copyright 2015 The Cockroach Authors.
+// Copyright 2016 The Cockroach Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,21 +12,14 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 //
-// Author: Tobias Schottdorf
+// Author: Peter Mattis (peter@cockroachlabs.com)
 
-package log
+// +build !linux,!freebsd
 
-import (
-	"testing"
+package cli
 
-	"golang.org/x/net/context"
-)
+import "github.com/cockroachdb/cockroach/util/stop"
 
-func TestLogNilArg(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("test panicked")
-		}
-	}()
-	Warningc(context.Background(), "test", nil)
+func initBacktrace(logDir string) *stop.Stopper {
+	return stop.NewStopper()
 }

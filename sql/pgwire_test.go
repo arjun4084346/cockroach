@@ -29,6 +29,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/base"
 	"github.com/cockroachdb/cockroach/security"
 	"github.com/cockroachdb/cockroach/security/securitytest"
@@ -270,7 +272,7 @@ func TestPGPrepareFail(t *testing.T) {
 		"SELECT 3 + CASE (4) WHEN 4 THEN $1 END":    "pq: could not determine data type of placeholder $1",
 		"SELECT ($1 + $1) + CURRENT_DATE()":         "pq: could not determine data type of placeholder $1",
 		"SELECT $1 + $2, $2::FLOAT":                 "pq: could not determine data type of placeholder $1",
-		"SELECT ($1 + 2) + ($1 + 2.5)":              "pq: unsupported binary operator: <int> + <decimal>",
+		"SELECT ($1 + 2) + ($1 + 2.5::FLOAT)":       "pq: unsupported binary operator: <int> + <float>",
 	}
 
 	if _, err := db.Exec(`CREATE DATABASE d; CREATE TABLE d.t (i INT, s STRING, d INT)`); err != nil {
@@ -402,7 +404,7 @@ func TestPGPreparedQuery(t *testing.T) {
 				Results("hashedPassword", "BYTES", true, gosql.NullBool{}),
 		},
 		"SHOW DATABASES": {
-			baseTest.Results("d").Results("system"),
+			baseTest.Results("information_schema").Results("d").Results("system"),
 		},
 		"SHOW GRANTS ON system.users": {
 			baseTest.Results("users", security.RootUser, "DELETE,GRANT,INSERT,SELECT,UPDATE"),
@@ -556,7 +558,7 @@ func TestPGPreparedQuery(t *testing.T) {
 	runTests := func(query string, tests []preparedQueryTest, queryFunc func(...interface{}) (*gosql.Rows, error)) {
 		for _, test := range tests {
 			if testing.Verbose() || log.V(1) {
-				log.Infof("query: %s", query)
+				log.Infof(context.Background(), "query: %s", query)
 			}
 			rows, err := queryFunc(test.qargs...)
 			if err != nil {
@@ -812,7 +814,7 @@ func TestPGPreparedExec(t *testing.T) {
 	runTests := func(query string, tests []preparedExecTest, execFunc func(...interface{}) (gosql.Result, error)) {
 		for _, test := range tests {
 			if testing.Verbose() || log.V(1) {
-				log.Infof("exec: %s", query)
+				log.Infof(context.Background(), "exec: %s", query)
 			}
 			if result, err := execFunc(test.qargs...); err != nil {
 				if test.error == "" {
@@ -838,7 +840,7 @@ func TestPGPreparedExec(t *testing.T) {
 
 	for _, execTest := range execTests {
 		if testing.Verbose() || log.V(1) {
-			log.Infof("prepare: %s", execTest.query)
+			log.Infof(context.Background(), "prepare: %s", execTest.query)
 		}
 		if stmt, err := db.Prepare(execTest.query); err != nil {
 			t.Errorf("%s: prepare error: %s", execTest.query, err)

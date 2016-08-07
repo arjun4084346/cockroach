@@ -17,8 +17,11 @@
 package sql
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
+
+	"golang.org/x/net/context"
 
 	"github.com/cockroachdb/cockroach/keys"
 	"github.com/cockroachdb/cockroach/security"
@@ -26,6 +29,7 @@ import (
 	"github.com/cockroachdb/cockroach/sql/privilege"
 	"github.com/cockroachdb/cockroach/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/util"
+	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/pkg/errors"
 )
 
@@ -71,7 +75,7 @@ func (n *createDatabaseNode) expandPlan() error {
 func (n *createDatabaseNode) Start() error {
 	desc := makeDatabaseDesc(n.n)
 
-	created, err := n.p.createDescriptor(databaseKey{string(n.n.Name)}, &desc, n.n.IfNotExists)
+	created, err := n.p.createDatabase(&desc, n.n.IfNotExists)
 	if err != nil {
 		return err
 	}
@@ -150,10 +154,6 @@ func (n *createIndexNode) Start() error {
 		}
 	}
 
-	if n.n.Interleave != nil {
-		return util.UnimplementedWithIssueErrorf(2972, "interleaving is not yet supported")
-	}
-
 	indexDesc := sqlbase.IndexDescriptor{
 		Name:             string(n.n.Name),
 		Unique:           n.n.Unique,
@@ -163,6 +163,7 @@ func (n *createIndexNode) Start() error {
 		return err
 	}
 
+	mutationIdx := len(n.tableDesc.Mutations)
 	n.tableDesc.AddIndexMutation(indexDesc, sqlbase.DescriptorMutation_ADD)
 	mutationID, err := n.tableDesc.FinalizeMutation()
 	if err != nil {
@@ -170,6 +171,16 @@ func (n *createIndexNode) Start() error {
 	}
 	if err := n.tableDesc.AllocateIDs(); err != nil {
 		return err
+	}
+
+	if n.n.Interleave != nil {
+		index := n.tableDesc.Mutations[mutationIdx].GetIndex()
+		if err := n.p.addInterleave(n.tableDesc, index, n.n.Interleave); err != nil {
+			return err
+		}
+		if err := n.p.finalizeInterleave(n.tableDesc, *index); err != nil {
+			return err
+		}
 	}
 
 	if err := n.p.txn.Put(
@@ -226,12 +237,9 @@ func (p *planner) CreateTable(n *parser.CreateTable) (planNode, error) {
 		return nil, err
 	}
 
-	dbDesc, err := p.getDatabaseDesc(n.Table.Database())
+	dbDesc, err := p.mustGetDatabaseDesc(n.Table.Database())
 	if err != nil {
 		return nil, err
-	}
-	if dbDesc == nil {
-		return nil, sqlbase.NewUndefinedDatabaseError(n.Table.Database())
 	}
 
 	if err := p.checkPrivilege(dbDesc, privilege.CREATE); err != nil {
@@ -247,7 +255,7 @@ func hoistConstraints(n *parser.CreateTable) {
 			if col.CheckExpr.Expr != nil {
 				def := &parser.CheckConstraintTableDef{Expr: col.CheckExpr.Expr}
 				if col.CheckExpr.ConstraintName != "" {
-					def.Name = parser.Name(col.CheckExpr.ConstraintName)
+					def.Name = col.CheckExpr.ConstraintName
 				}
 				n.Defs = append(n.Defs, def)
 				col.CheckExpr.Expr = nil
@@ -262,7 +270,7 @@ func (n *createTableNode) expandPlan() error {
 
 func (n *createTableNode) Start() error {
 	hoistConstraints(n.n)
-	desc, err := sqlbase.MakeTableDesc(n.n, n.dbDesc.ID)
+	desc, err := MakeTableDesc(n.n, n.dbDesc.ID)
 	if err != nil {
 		return err
 	}
@@ -296,18 +304,51 @@ func (n *createTableNode) Start() error {
 		return err
 	}
 
+	if n.n.Interleave != nil {
+		if err := n.p.addInterleave(&desc, &desc.PrimaryIndex, n.n.Interleave); err != nil {
+			return err
+		}
+	}
+
 	// FKs are resolved after the descriptor is otherwise complete and IDs have
 	// been allocated since the FKs will reference those IDs.
 	var fkTargets []fkTargetUpdate
 	for _, def := range n.n.Defs {
-		if col, ok := def.(*parser.ColumnTableDef); ok {
-			if col.References.Table != nil {
-				modified, err := n.resolveColFK(&desc, col.Name, col.References.Table, col.References.Col, col.References.ConstraintName)
+		switch d := def.(type) {
+		case *parser.ColumnTableDef:
+			if d.References.Table != nil {
+				var targetCol parser.NameList
+				if d.References.Col != "" {
+					targetCol = append(targetCol, string(d.References.Col))
+				}
+				modified, err := n.resolveFK(&desc, parser.NameList{string(d.Name)}, d.References.Table, targetCol, d.References.ConstraintName)
 				if err != nil {
 					return err
 				}
 				fkTargets = append(fkTargets, modified)
 			}
+		case *parser.ForeignKeyConstraintTableDef:
+			modified, err := n.resolveFK(&desc, d.FromCols, d.Table, d.ToCols, d.Name)
+			if err != nil {
+				return err
+			}
+			fkTargets = append(fkTargets, modified)
+		}
+	}
+
+	// Multiple FKs from the same column would potentially result in ambiguous or
+	// unexpected behavior with conflicting CASCADE/RESTRICT/etc behaviors.
+	colsInFKs := make(map[sqlbase.ColumnID]struct{})
+	for _, t := range fkTargets {
+		i, err := desc.FindIndexByID(t.srcIdx)
+		if err != nil {
+			return errors.Wrap(err, "could not resolve FK index to check for columns overlaps")
+		}
+		for x := range i.ColumnIDs {
+			if _, ok := colsInFKs[i.ColumnIDs[x]]; ok {
+				return errors.Errorf("column %q cannot be used by multiple foreign key constraints", i.ColumnNames[x])
+			}
+			colsInFKs[i.ColumnIDs[x]] = struct{}{}
 		}
 	}
 
@@ -317,26 +358,37 @@ func (n *createTableNode) Start() error {
 	if desc.ID == 0 {
 		desc.ID = keys.MaxReservedDescID + 1
 	}
-	err = desc.Validate()
+	// Only validate the table because backreferences aren't created yet.
+	// Everything is validated below.
+	err = desc.ValidateTable()
 	desc.ID = savedID
 	if err != nil {
 		return err
 	}
 
-	if n.n.Interleave != nil {
-		return util.UnimplementedWithIssueErrorf(2972, "interleaving is not yet supported")
-	}
-
-	created, err := n.p.createDescriptor(tableKey{n.dbDesc.ID, n.n.Table.Table()}, &desc, n.n.IfNotExists)
+	created, err := n.p.createDescriptor(
+		tableKey{n.dbDesc.ID, n.n.Table.Table()}, &desc, n.n.IfNotExists)
 	if err != nil {
 		return err
 	}
 
-	if err := n.finalizeFKs(&desc, fkTargets); err != nil {
-		return err
-	}
-
 	if created {
+		if err := n.finalizeFKs(&desc, fkTargets); err != nil {
+			return err
+		}
+
+		for _, index := range desc.AllNonDropIndexes() {
+			if len(index.Interleave.Ancestors) > 0 {
+				if err := n.p.finalizeInterleave(&desc, index); err != nil {
+					return err
+				}
+			}
+		}
+
+		if err := desc.Validate(n.p.txn); err != nil {
+			return err
+		}
+
 		// Log Create Table event. This is an auditable log event and is
 		// recorded in the same transaction as the table descriptor update.
 		if err := MakeEventLogger(n.p.leaseMgr).InsertEventRecord(n.p.txn,
@@ -378,15 +430,15 @@ type fkTargetUpdate struct {
 	targetIdx sqlbase.IndexID          // ID of target (referenced) index
 }
 
-func (n *createTableNode) resolveColFK(
+func (n *createTableNode) resolveFK(
 	tbl *sqlbase.TableDescriptor,
-	fromCol parser.Name,
+	fromCols parser.NameList,
 	targetTable *parser.QualifiedName,
-	targetColName parser.Name,
+	targetColNames parser.NameList,
 	constraintName parser.Name,
 ) (fkTargetUpdate, error) {
 	var ret fkTargetUpdate
-	src, err := tbl.FindActiveColumnByName(string(fromCol))
+	srcCols, err := tbl.FindActiveColumnsByNames(fromCols)
 	if err != nil {
 		return ret, err
 	}
@@ -403,76 +455,119 @@ func (n *createTableNode) resolveColFK(
 		}
 	}
 	ret.target = target
-	// If a column isn't specified, attempt to default to PK.
-	if targetColName == "" {
-		if len(target.PrimaryIndex.ColumnNames) != 1 {
-			return ret, errors.Errorf("must specify a single unique column to reference %q", targetTable.String())
-		}
-		targetColName = parser.Name(target.PrimaryIndex.ColumnNames[0])
+
+	// If no columns are specified, attempt to default to PK.
+	if len(targetColNames) == 0 {
+		targetColNames = target.PrimaryIndex.ColumnNames
 	}
 
-	targetCol, err := target.FindActiveColumnByName(string(targetColName))
+	targetCols, err := target.FindActiveColumnsByNames(targetColNames)
 	if err != nil {
 		return ret, err
 	}
 
-	if src.Type.Kind != targetCol.Type.Kind {
-		return ret, fmt.Errorf("type of %q (%s) does not match foreign key %q.%q (%s)",
-			fromCol, src.Type.Kind, target.Name, targetCol.Name, targetCol.Type.Kind)
+	if len(targetCols) != len(srcCols) {
+		return ret, errors.Errorf("%d columns must reference exactly %d columns in referenced table (found %d)",
+			len(srcCols), len(srcCols), len(targetCols))
 	}
 
-	found := false
-	if target.PrimaryIndex.ColumnIDs[0] == targetCol.ID {
-		found = true
+	for i := range srcCols {
+		if s, t := srcCols[i], targetCols[i]; s.Type.Kind != t.Type.Kind {
+			return ret, fmt.Errorf("type of %q (%s) does not match foreign key %q.%q (%s)",
+				s.Name, s.Type.Kind, target.Name, t.Name, t.Type.Kind)
+		}
+	}
+
+	type indexMatch bool
+	const (
+		matchExact  indexMatch = true
+		matchPrefix indexMatch = false
+	)
+
+	// Referenced cols must be unique, thus referenced indexes must match exactly.
+	// Referencing cols have no uniqueness requirement and thus may match a
+	// strict prefix of an index.
+	matchesIndex := func(
+		cols []sqlbase.ColumnDescriptor, idx sqlbase.IndexDescriptor, exact indexMatch,
+	) bool {
+		if len(cols) > len(idx.ColumnIDs) || (exact && len(cols) != len(idx.ColumnIDs)) {
+			return false
+		}
+
+		for i := range cols {
+			if cols[i].ID != idx.ColumnIDs[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	if matchesIndex(targetCols, target.PrimaryIndex, matchExact) {
 		ret.targetIdx = target.PrimaryIndex.ID
 	} else {
+		found := false
 		// Find the index corresponding to the referenced column.
 		for _, idx := range target.Indexes {
-			if idx.Unique && idx.ColumnIDs[0] == targetCol.ID {
+			if idx.Unique && matchesIndex(targetCols, idx, matchExact) {
 				ret.targetIdx = idx.ID
 				found = true
 				break
 			}
 		}
-	}
-	if !found {
-		return ret, fmt.Errorf("foreign key requires a unique index on %s.%s", targetTable.String(), targetCol.Name)
+		if !found {
+			return ret, fmt.Errorf("foreign key requires table %q have a unique index on %s", targetTable.String(), colNames(targetCols))
+		}
 	}
 
 	if constraintName == "" {
-		constraintName = parser.Name(fmt.Sprintf("fk_%s_ref_%s_%s", fromCol, target.Name, targetColName))
+		constraintName = parser.Name(fmt.Sprintf("fk_%s_ref_%s", fromCols[0], target.Name))
 	}
 
-	ref := &sqlbase.ForeignKeyReference{Table: target.ID, Index: ret.targetIdx, Name: string(constraintName)}
+	ref := sqlbase.ForeignKeyReference{Table: target.ID, Index: ret.targetIdx, Name: string(constraintName)}
 
-	found = false
-	if tbl.PrimaryIndex.ColumnIDs[0] == src.ID {
+	if matchesIndex(srcCols, tbl.PrimaryIndex, matchPrefix) {
 		tbl.PrimaryIndex.ForeignKey = ref
 		ret.srcIdx = tbl.PrimaryIndex.ID
-		found = true
 	} else {
-		for i, idx := range tbl.Indexes {
-			if tbl.Indexes[i].ColumnIDs[0] == src.ID {
+		found := false
+		for i := range tbl.Indexes {
+			if matchesIndex(srcCols, tbl.Indexes[i], matchPrefix) {
 				tbl.Indexes[i].ForeignKey = ref
-				ret.srcIdx = idx.ID
+				ret.srcIdx = tbl.Indexes[i].ID
 				found = true
 				break
 			}
 		}
-	}
-	if !found {
-		return ret, fmt.Errorf("foreign key column %q must be the prefix of an index", src.Name)
+		if !found {
+			return ret, fmt.Errorf("foreign key columns %s must be the prefix of an index", colNames(srcCols))
+		}
 	}
 
+	// Create the table non-public, since we'll need to ensure the FK back-refs
+	// are in place before we can allow writes.
 	tbl.State = sqlbase.TableDescriptor_ADD
 	return ret, nil
+}
+
+// colNames converts a []colDesc to a human-readable string for use in error messages.
+func colNames(cols []sqlbase.ColumnDescriptor) string {
+	var s bytes.Buffer
+	s.WriteString(`("`)
+	for i, c := range cols {
+		if i != 0 {
+			s.WriteString(`", "`)
+		}
+		s.WriteString(c.Name)
+	}
+	s.WriteString(`")`)
+	return s.String()
 }
 
 func (p *planner) saveNonmutationAndNotify(td *sqlbase.TableDescriptor) error {
 	if err := td.SetUpVersion(); err != nil {
 		return err
 	}
-	if err := td.Validate(); err != nil {
+	if err := td.ValidateTable(); err != nil {
 		return err
 	}
 	if err := p.writeTableDesc(td); err != nil {
@@ -482,15 +577,74 @@ func (p *planner) saveNonmutationAndNotify(td *sqlbase.TableDescriptor) error {
 	return nil
 }
 
+// addInterleave marks an index as one that is interleaved in some parent data
+// according to the given definition.
+func (p *planner) addInterleave(
+	desc *sqlbase.TableDescriptor, index *sqlbase.IndexDescriptor, interleave *parser.InterleaveDef,
+) error {
+	if interleave.DropBehavior != parser.DropDefault {
+		return util.UnimplementedWithIssueErrorf(
+			7854, "unsupported shorthand %s", interleave.DropBehavior)
+	}
+
+	parentTable, err := p.mustGetTableDesc(interleave.Parent)
+	if err != nil {
+		return err
+	}
+	parentIndex := parentTable.PrimaryIndex
+
+	if len(interleave.Fields) != len(parentIndex.ColumnIDs) {
+		return fmt.Errorf("interleaved columns must match parent")
+	}
+	if len(interleave.Fields) > len(index.ColumnIDs) {
+		return fmt.Errorf("declared columns must match index being interleaved")
+	}
+	for i, targetColID := range parentIndex.ColumnIDs {
+		targetCol, err := parentTable.FindColumnByID(targetColID)
+		if err != nil {
+			return err
+		}
+		col, err := desc.FindColumnByID(index.ColumnIDs[i])
+		if err != nil {
+			return err
+		}
+		if sqlbase.NormalizeName(interleave.Fields[i]) != sqlbase.NormalizeName(col.Name) {
+			return fmt.Errorf("declared columns must match index being interleaved")
+		}
+		if col.Type != targetCol.Type ||
+			index.ColumnDirections[i] != parentIndex.ColumnDirections[i] {
+
+			return fmt.Errorf("interleaved columns must match parent")
+		}
+	}
+
+	ancestorPrefix := append(
+		[]sqlbase.InterleaveDescriptor_Ancestor(nil), parentIndex.Interleave.Ancestors...)
+	intl := sqlbase.InterleaveDescriptor_Ancestor{
+		TableID:         parentTable.ID,
+		IndexID:         parentIndex.ID,
+		SharedPrefixLen: uint32(len(parentIndex.ColumnIDs)),
+	}
+	for _, ancestor := range ancestorPrefix {
+		intl.SharedPrefixLen -= ancestor.SharedPrefixLen
+	}
+	index.Interleave = sqlbase.InterleaveDescriptor{Ancestors: append(ancestorPrefix, intl)}
+
+	desc.State = sqlbase.TableDescriptor_ADD
+	return nil
+}
+
 func (n *createTableNode) finalizeFKs(desc *sqlbase.TableDescriptor, fkTargets []fkTargetUpdate) error {
 	for _, t := range fkTargets {
 		targetIdx, err := t.target.FindIndexByID(t.targetIdx)
 		if err != nil {
 			return err
 		}
-		targetIdx.ReferencedBy = append(targetIdx.ReferencedBy,
-			&sqlbase.ForeignKeyReference{Table: desc.ID, Index: t.srcIdx})
+		backref := sqlbase.ForeignKeyReference{Table: desc.ID, Index: t.srcIdx}
+		targetIdx.ReferencedBy = append(targetIdx.ReferencedBy, backref)
 
+		// For self-referencing FKs, the ref was added before the table had an ID
+		// assigned so we need to update it now to the assigned value.
 		if t.target == desc {
 			srcIdx, err := desc.FindIndexByID(t.srcIdx)
 			if err != nil {
@@ -514,4 +668,225 @@ func (n *createTableNode) finalizeFKs(desc *sqlbase.TableDescriptor, fkTargets [
 		}
 	}
 	return nil
+}
+
+// finalizeInterleave creats backreferences from an interleaving parent to the
+// child data being interleaved.
+func (p *planner) finalizeInterleave(
+	desc *sqlbase.TableDescriptor, index sqlbase.IndexDescriptor,
+) error {
+	// TODO(dan): This is similar to finalizeFKs. Consolidate them
+	if len(index.Interleave.Ancestors) == 0 {
+		return nil
+	}
+	// Only the last ancestor needs the backreference.
+	ancestor := index.Interleave.Ancestors[len(index.Interleave.Ancestors)-1]
+	var ancestorTable *sqlbase.TableDescriptor
+	if ancestor.TableID == desc.ID {
+		ancestorTable = desc
+	} else {
+		var err error
+		ancestorTable, err = sqlbase.GetTableDescFromID(p.txn, ancestor.TableID)
+		if err != nil {
+			return err
+		}
+	}
+	ancestorIndex, err := ancestorTable.FindIndexByID(ancestor.IndexID)
+	if err != nil {
+		return err
+	}
+	ancestorIndex.InterleavedBy = append(ancestorIndex.InterleavedBy,
+		sqlbase.ForeignKeyReference{Table: desc.ID, Index: index.ID})
+
+	if err := p.saveNonmutationAndNotify(ancestorTable); err != nil {
+		return err
+	}
+
+	if desc.State == sqlbase.TableDescriptor_ADD {
+		desc.State = sqlbase.TableDescriptor_PUBLIC
+
+		if err := p.saveNonmutationAndNotify(desc); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// CreateTableDescriptor turns a schema string into a TableDescriptor.
+func CreateTableDescriptor(
+	id, parentID sqlbase.ID, schema string, privileges *sqlbase.PrivilegeDescriptor,
+) sqlbase.TableDescriptor {
+	stmt, err := parser.ParseOneTraditional(schema)
+	if err != nil {
+		log.Fatal(context.TODO(), err)
+	}
+
+	desc, err := MakeTableDesc(stmt.(*parser.CreateTable), parentID)
+	if err != nil {
+		log.Fatal(context.TODO(), err)
+	}
+
+	desc.Privileges = privileges
+
+	desc.ID = id
+	if err := desc.AllocateIDs(); err != nil {
+		log.Fatalf(context.TODO(), "%s: %v", desc.Name, err)
+	}
+
+	return desc
+}
+
+// MakeTableDesc creates a table descriptor from a CreateTable statement.
+func MakeTableDesc(p *parser.CreateTable, parentID sqlbase.ID) (sqlbase.TableDescriptor, error) {
+	desc := sqlbase.TableDescriptor{}
+	if err := p.Table.NormalizeTableName(""); err != nil {
+		return desc, err
+	}
+	desc.Name = p.Table.Table()
+	desc.ParentID = parentID
+	desc.FormatVersion = sqlbase.FamilyFormatVersion
+	// We don't use version 0.
+	desc.Version = 1
+
+	var primaryIndexColumnSet map[parser.Name]struct{}
+	for _, def := range p.Defs {
+		switch d := def.(type) {
+		case *parser.ColumnTableDef:
+			col, idx, err := sqlbase.MakeColumnDefDescs(d)
+			if err != nil {
+				return desc, err
+			}
+			desc.AddColumn(*col)
+			if idx != nil {
+				if err := desc.AddIndex(*idx, d.PrimaryKey); err != nil {
+					return desc, err
+				}
+			}
+			if d.Family.Create || len(d.Family.Name) > 0 {
+				// Pass true for `create` and `ifNotExists` because when we're creating
+				// a table, we always want to create the specified family if it doesn't
+				// exist.
+				err := desc.AddColumnToFamilyMaybeCreate(col.Name, string(d.Family.Name), true, true)
+				if err != nil {
+					return desc, err
+				}
+			}
+
+		case *parser.IndexTableDef:
+			idx := sqlbase.IndexDescriptor{
+				Name:             string(d.Name),
+				StoreColumnNames: d.Storing,
+			}
+			if err := idx.FillColumns(d.Columns); err != nil {
+				return desc, err
+			}
+			if err := desc.AddIndex(idx, false); err != nil {
+				return desc, err
+			}
+			if d.Interleave != nil {
+				return desc, util.UnimplementedWithIssueErrorf(2972, "interleaving is not yet supported")
+			}
+		case *parser.UniqueConstraintTableDef:
+			idx := sqlbase.IndexDescriptor{
+				Name:             string(d.Name),
+				Unique:           true,
+				StoreColumnNames: d.Storing,
+			}
+			if err := idx.FillColumns(d.Columns); err != nil {
+				return desc, err
+			}
+			if err := desc.AddIndex(idx, d.PrimaryKey); err != nil {
+				return desc, err
+			}
+			if d.PrimaryKey {
+				primaryIndexColumnSet = make(map[parser.Name]struct{})
+				for _, c := range d.Columns {
+					primaryIndexColumnSet[c.Column] = struct{}{}
+				}
+			}
+			if d.Interleave != nil {
+				return desc, util.UnimplementedWithIssueErrorf(2972, "interleaving is not yet supported")
+			}
+		case *parser.CheckConstraintTableDef:
+			// CHECK expressions seem to vary across databases. Wikipedia's entry on
+			// Check_constraint (https://en.wikipedia.org/wiki/Check_constraint) says
+			// that if the constraint refers to a single column only, it is possible to
+			// specify the constraint as part of the column definition. Postgres allows
+			// specifying them anywhere about any columns, but it moves all constraints to
+			// the table level (i.e., columns never have a check constraint themselves). We
+			// will adhere to the stricter definition.
+
+			preFn := func(expr parser.Expr) (err error, recurse bool, newExpr parser.Expr) {
+				qname, ok := expr.(*parser.QualifiedName)
+				if !ok {
+					// Not a qname, don't do anything to this node.
+					return nil, true, expr
+				}
+
+				if err := qname.NormalizeColumnName(); err != nil {
+					return err, false, nil
+				}
+
+				if qname.IsStar() {
+					return fmt.Errorf("* not allowed in constraint %q", d.Expr.String()), false, nil
+				}
+				col, err := desc.FindActiveColumnByName(qname.Column())
+				if err != nil {
+					return fmt.Errorf("column %q not found for constraint %q", qname.String(), d.Expr.String()), false, nil
+				}
+				// Convert to a dummy datum of the correct type.
+				return nil, false, col.Type.ToDatumType()
+			}
+
+			expr, err := parser.SimpleVisit(d.Expr, preFn)
+			if err != nil {
+				return desc, err
+			}
+
+			if err := sqlbase.SanitizeVarFreeExpr(expr, parser.TypeBool, "CHECK"); err != nil {
+				return desc, err
+			}
+
+			var p parser.Parser
+			if p.AggregateInExpr(expr) {
+				return desc, fmt.Errorf("Aggregate functions are not allowed in CHECK expressions")
+			}
+
+			check := &sqlbase.TableDescriptor_CheckConstraint{Expr: d.Expr.String()}
+			if len(d.Name) > 0 {
+				check.Name = string(d.Name)
+			}
+			desc.Checks = append(desc.Checks, check)
+
+		case *parser.FamilyTableDef:
+			names := make([]string, len(d.Columns))
+			for i, col := range d.Columns {
+				names[i] = string(col.Column)
+			}
+			fam := sqlbase.ColumnFamilyDescriptor{
+				Name:        string(d.Name),
+				ColumnNames: names,
+			}
+			desc.AddFamily(fam)
+
+		case *parser.ForeignKeyConstraintTableDef:
+			// Pass for now since FKs can reference other elements and thus are
+			// resolved only after the rest of the desc is constructed.
+
+		default:
+			return desc, errors.Errorf("unsupported table def: %T", def)
+		}
+	}
+
+	if primaryIndexColumnSet != nil {
+		// Primary index columns are not nullable.
+		for i := range desc.Columns {
+			if _, ok := primaryIndexColumnSet[parser.Name(desc.Columns[i].Name)]; ok {
+				desc.Columns[i].Nullable = false
+			}
+		}
+	}
+
+	return desc, nil
 }

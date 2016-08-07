@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/sql/parser"
 	"github.com/cockroachdb/cockroach/sql/privilege"
 	"github.com/cockroachdb/cockroach/sql/sqlbase"
+	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/pkg/errors"
 )
@@ -105,9 +106,9 @@ func (n *dropDatabaseNode) Start() error {
 
 	b := &client.Batch{}
 	if log.V(2) {
-		log.Infof("Del %s", descKey)
-		log.Infof("Del %s", nameKey)
-		log.Infof("Del %s", zoneKey)
+		log.Infof(n.p.ctx(), "Del %s", descKey)
+		log.Infof(n.p.ctx(), "Del %s", nameKey)
+		log.Infof(n.p.ctx(), "Del %s", zoneKey)
 	}
 	b.Del(descKey)
 	b.Del(nameKey)
@@ -168,10 +169,6 @@ type dropIndexNode struct {
 //          mysql requires the INDEX privilege on the table.
 func (p *planner) DropIndex(n *parser.DropIndex) (planNode, error) {
 	for _, index := range n.IndexList {
-		if err := index.Table.NormalizeTableName(p.session.Database); err != nil {
-			return nil, err
-		}
-
 		tableDesc, err := p.mustGetTableDesc(index.Table)
 		if err != nil {
 			return nil, err
@@ -216,11 +213,16 @@ func (n *dropIndexNode) Start() error {
 		case sqlbase.DescriptorActive:
 			idx := tableDesc.Indexes[i]
 
-			if idx.ForeignKey != nil {
+			if idx.ForeignKey.IsSet() {
 				if n.n.DropBehavior != parser.DropCascade {
 					return fmt.Errorf("index %q is in use as a foreign key constraint", idx.Name)
 				}
 				if err := n.p.removeFKBackReference(tableDesc, idx); err != nil {
+					return err
+				}
+			}
+			if len(idx.Interleave.Ancestors) > 0 {
+				if err := n.p.removeInterleaveBackReference(tableDesc, idx); err != nil {
 					return err
 				}
 			}
@@ -231,6 +233,11 @@ func (n *dropIndexNode) Start() error {
 					return err
 				}
 				if err := n.p.removeFK(ref, fetched); err != nil {
+					return err
+				}
+			}
+			for _, ref := range idx.InterleavedBy {
+				if err := n.p.removeInterleave(ref); err != nil {
 					return err
 				}
 			}
@@ -251,7 +258,7 @@ func (n *dropIndexNode) Start() error {
 		if err != nil {
 			return err
 		}
-		if err := tableDesc.Validate(); err != nil {
+		if err := tableDesc.Validate(n.p.txn); err != nil {
 			return err
 		}
 		if err := n.p.writeTableDesc(tableDesc); err != nil {
@@ -322,6 +329,11 @@ func (p *planner) DropTable(n *parser.DropTable) (planNode, error) {
 					return nil, err
 				}
 			}
+			for _, ref := range idx.InterleavedBy {
+				if err := p.canRemoveInterleave(droppedDesc.Name, ref, n.DropBehavior); err != nil {
+					return nil, err
+				}
+			}
 		}
 		td = append(td, droppedDesc)
 	}
@@ -337,9 +349,9 @@ func (n *dropTableNode) expandPlan() error {
 }
 
 func (p *planner) canRemoveFK(
-	from string, ref *sqlbase.ForeignKeyReference, behavior parser.DropBehavior,
+	from string, ref sqlbase.ForeignKeyReference, behavior parser.DropBehavior,
 ) (*sqlbase.TableDescriptor, error) {
-	table, err := getTableDescFromID(p.txn, ref.Table)
+	table, err := sqlbase.GetTableDescFromID(p.txn, ref.Table)
 	if err != nil {
 		return nil, err
 	}
@@ -352,10 +364,33 @@ func (p *planner) canRemoveFK(
 	return table, nil
 }
 
-func (p *planner) removeFK(ref *sqlbase.ForeignKeyReference, table *sqlbase.TableDescriptor) error {
+func (p *planner) canRemoveInterleave(
+	from string, ref sqlbase.ForeignKeyReference, behavior parser.DropBehavior,
+) error {
+	table, err := sqlbase.GetTableDescFromID(p.txn, ref.Table)
+	if err != nil {
+		return err
+	}
+	// TODO(dan): It's possible to DROP a table that has a child interleave, but
+	// some loose ends would have to be addresssed. The zone would have to be
+	// kept and deleted when the last table in it is removed. Also, the dropped
+	// table's descriptor would have to be kept around in some Dropped but
+	// non-public state for referential integrity of the `InterleaveDescriptor`
+	// pointers.
+	if behavior != parser.DropCascade {
+		return util.UnimplementedWithIssueErrorf(
+			8036, "%q is interleaved by table %q", from, table.Name)
+	}
+	if err := p.checkPrivilege(table, privilege.CREATE); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *planner) removeFK(ref sqlbase.ForeignKeyReference, table *sqlbase.TableDescriptor) error {
 	if table == nil {
 		var err error
-		table, err = getTableDescFromID(p.txn, ref.Table)
+		table, err = sqlbase.GetTableDescFromID(p.txn, ref.Table)
 		if err != nil {
 			return err
 		}
@@ -364,7 +399,20 @@ func (p *planner) removeFK(ref *sqlbase.ForeignKeyReference, table *sqlbase.Tabl
 	if err != nil {
 		return err
 	}
-	idx.ForeignKey = nil
+	idx.ForeignKey = sqlbase.ForeignKeyReference{}
+	return p.saveNonmutationAndNotify(table)
+}
+
+func (p *planner) removeInterleave(ref sqlbase.ForeignKeyReference) error {
+	table, err := sqlbase.GetTableDescFromID(p.txn, ref.Table)
+	if err != nil {
+		return err
+	}
+	idx, err := table.FindIndexByID(ref.Index)
+	if err != nil {
+		return err
+	}
+	idx.Interleave.Ancestors = nil
 	return p.saveNonmutationAndNotify(table)
 }
 
@@ -445,16 +493,26 @@ func (p *planner) dropTableImpl(tableDesc *sqlbase.TableDescriptor) error {
 	}
 	p.notifySchemaChange(tableDesc.ID, sqlbase.InvalidMutationID)
 
-	// Remove FK relationships.
+	// Remove FK and interleave relationships.
 	for _, idx := range tableDesc.AllNonDropIndexes() {
-		if idx.ForeignKey != nil {
+		if idx.ForeignKey.IsSet() {
 			if err := p.removeFKBackReference(tableDesc, idx); err != nil {
+				return err
+			}
+		}
+		if len(idx.Interleave.Ancestors) > 0 {
+			if err := p.removeInterleaveBackReference(tableDesc, idx); err != nil {
 				return err
 			}
 		}
 		for _, ref := range idx.ReferencedBy {
 			// Nil forces re-fetching tables, since they may have been modified.
 			if err := p.removeFK(ref, nil); err != nil {
+				return err
+			}
+		}
+		for _, ref := range idx.InterleavedBy {
+			if err := p.removeInterleave(ref); err != nil {
 				return err
 			}
 		}
@@ -483,7 +541,7 @@ func (p *planner) dropTableImpl(tableDesc *sqlbase.TableDescriptor) error {
 func (p *planner) removeFKBackReference(
 	tableDesc *sqlbase.TableDescriptor, idx sqlbase.IndexDescriptor,
 ) error {
-	t, err := getTableDescFromID(p.txn, idx.ForeignKey.Table)
+	t, err := sqlbase.GetTableDescFromID(p.txn, idx.ForeignKey.Table)
 	if err != nil {
 		return errors.Errorf("error resolving referenced table ID %d: %v", idx.ForeignKey.Table, err)
 	}
@@ -494,6 +552,29 @@ func (p *planner) removeFKBackReference(
 	for k, ref := range targetIdx.ReferencedBy {
 		if ref.Table == tableDesc.ID {
 			targetIdx.ReferencedBy = append(targetIdx.ReferencedBy[:k], targetIdx.ReferencedBy[k+1:]...)
+		}
+	}
+	return p.saveNonmutationAndNotify(t)
+}
+
+func (p *planner) removeInterleaveBackReference(
+	tableDesc *sqlbase.TableDescriptor, idx sqlbase.IndexDescriptor,
+) error {
+	if len(idx.Interleave.Ancestors) == 0 {
+		return nil
+	}
+	ancestor := idx.Interleave.Ancestors[len(idx.Interleave.Ancestors)-1]
+	t, err := sqlbase.GetTableDescFromID(p.txn, ancestor.TableID)
+	if err != nil {
+		return errors.Errorf("error resolving referenced table ID %d: %v", ancestor.TableID, err)
+	}
+	targetIdx, err := t.FindIndexByID(ancestor.IndexID)
+	if err != nil {
+		return err
+	}
+	for k, ref := range targetIdx.InterleavedBy {
+		if ref.Table == tableDesc.ID && ref.Index == idx.ID {
+			targetIdx.InterleavedBy = append(targetIdx.InterleavedBy[:k], targetIdx.InterleavedBy[k+1:]...)
 		}
 	}
 	return p.saveNonmutationAndNotify(t)

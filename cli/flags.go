@@ -40,7 +40,7 @@ import (
 var maxResults int64
 
 var connURL string
-var connUser, connHost, connPort, httpPort, httpAddr, connDBName string
+var connUser, connHost, connPort, httpPort, httpAddr, connDBName, zoneConfig string
 var startBackground bool
 var undoFreezeCluster bool
 
@@ -70,6 +70,9 @@ nodes. For example:`) + `
 
   --attrs=us-west-1b:gpu
 `,
+
+	cliflags.ZoneConfigName: wrapText(`
+File to read the zone configuration from. Specify "-" to read from standard input.`),
 
 	cliflags.BackgroundName: wrapText(`
 Start the server in the background. This is similar to appending "&"
@@ -109,15 +112,25 @@ with a non-zero status code and further statements are not executed. The
 results of each SQL statement are printed on the standard output.`),
 
 	cliflags.PrettyName: wrapText(`
-Causes table rows to be formatted as tables using ASCII art. 
+Causes table rows to be formatted as tables using ASCII art.
 When not specified, table rows are printed as tab-separated values (TSV).`),
 
 	cliflags.JoinName: wrapText(`
-A comma-separated list of addresses to use when a new node is joining
-an existing cluster. For the first node in a cluster, --join should
-NOT be specified. Each address in the list has an optional type:
-[type=]<address>. An unspecified type means ip address or dns. Type
-is one of:`) + `
+The address of node which acts as bootstrap when a new node is
+joining an existing cluster. This flag can be specified
+separately for each address, for example:`) + `
+
+  --join=localhost:1234 --join=localhost:2345
+
+` + wrapText(`
+Or can be specified as a comma separated list in single flag,
+or both forms can be used together, for example:`) + `
+
+  --join=localhost:1234,localhost:2345 --join=localhost:3456
+
+` + wrapText(`
+Each address in the list has an optional type: [type=]<address>.
+An unspecified type means ip address or dns. Type is one of:`) + `
 
   - tcp: (default if type is omitted): plain ip address or hostname.
   - http-lb: HTTP load balancer: we query
@@ -418,7 +431,7 @@ func init() {
 		f.StringVar(&baseCtx.SSLCertKey, cliflags.KeyName, baseCtx.SSLCertKey, usageNoEnv(cliflags.KeyName))
 
 		// Cluster joining flags.
-		f.StringVar(&serverCtx.JoinUsing, cliflags.JoinName, serverCtx.JoinUsing, usageNoEnv(cliflags.JoinName))
+		f.VarP(&serverCtx.JoinList, cliflags.JoinName, "j", usageNoEnv(cliflags.JoinName))
 
 		// Engine flags.
 		setDefaultCacheSize(&serverCtx)
@@ -463,7 +476,10 @@ func init() {
 		// to a file. The user can override with --pretty.
 		f.BoolVar(&cliCtx.prettyFmt, cliflags.PrettyName, isInteractive, usageNoEnv(cliflags.PrettyName))
 	}
-
+	{
+		f := setZoneCmd.Flags()
+		f.StringVarP(&zoneConfig, cliflags.ZoneConfigName, "f", "", usageNoEnv(cliflags.ZoneConfigName))
+	}
 	{
 		f := sqlShellCmd.Flags()
 		f.VarP(&sqlCtx.execStmts, cliflags.ExecuteName, "e", usageNoEnv(cliflags.ExecuteName))

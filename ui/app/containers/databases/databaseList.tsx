@@ -8,7 +8,7 @@ import { AdminUIState } from "../../redux/state";
 import { setUISetting } from "../../redux/ui";
 import { SortableTable, SortableColumn, SortSetting } from "../../components/sortabletable";
 
-import { refreshDatabases } from "../../redux/databaseInfo";
+import { refreshDatabases } from "../../redux/apiReducers";
 
 // Constant used to store sort settings in the redux UI store.
 const UI_DATABASES_SORT_SETTING_KEY = "databaseList/sort_setting";
@@ -39,6 +39,8 @@ interface DatabasesColumnDescriptor {
   // databases. This will be used to sort the table according to the data in
   // this column.
   sort?: (s: string) => any;
+  // className to be applied to the td elements
+  className?: string;
 }
 
 /**
@@ -53,6 +55,7 @@ let columnDescriptors: DatabasesColumnDescriptor[] = [
     title: "Database Name",
     cell: (s) => <Link to={`databases/${s}`}>{s}</Link>,
     sort: _.identity,
+    className: "expand-link", // don't pad the td element to allow the link to expand
   },
 ];
 
@@ -108,6 +111,7 @@ class DatabasesMain extends React.Component<DatabasesMainProps, {}> {
           title: cd.title,
           cell: (index) => cd.cell(databases[index]),
           sortKey: cd.sort ? cd.key : undefined,
+          className: cd.className,
         };
       });
     });
@@ -153,7 +157,7 @@ class DatabasesMain extends React.Component<DatabasesMainProps, {}> {
  */
 
 // Base selectors to extract data from redux state.
-let databases = (state: AdminUIState): string[] => state.databaseInfo && state.databaseInfo.databases && state.databaseInfo.databases.data  && state.databaseInfo.databases.data.databases;
+let databases = (state: AdminUIState): string[] => state.cachedData.databases.data  && state.cachedData.databases.data.databases;
 let sortSetting = (state: AdminUIState): SortSetting => state.ui[UI_DATABASES_SORT_SETTING_KEY] || {};
 
 // Selector which sorts statuses according to current sort setting.
@@ -173,7 +177,7 @@ let sortedDatabases = createSelector(
 
 // Connect the DatabasesMain class with our redux store.
 let databasesMainConnected = connect(
-  (state, ownProps) => {
+  (state: AdminUIState) => {
     return {
       sortedDatabases: sortedDatabases(state),
       sortSetting: sortSetting(state),

@@ -1,4 +1,4 @@
-// Copyright 2015 The Cockroach Authors.
+// Copyright 2016 The Cockroach Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,20 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 //
-// Author: Tobias Schottdorf
+// Author: Tamir Duberstein (tamird@gmail.com)
 
-package log
+// +build deadlock
 
-import "golang.org/x/net/context"
+package syncutil
 
-// Add takes a context and an additional even number of arguments,
-// interpreted as key-value pairs. These are added on top of the
-// supplied context and the resulting context returned.
-func Add(ctx context.Context, kvs ...interface{}) context.Context {
-	l := len(kvs)
-	if l%2 != 0 {
-		panic("Add called with odd number of arguments")
-	}
-	for i := 1; i < l; i += 2 {
-		ctx = context.WithValue(ctx, kvs[i-1], kvs[i])
-	}
-	return ctx
+import deadlock "github.com/sasha-s/go-deadlock"
+
+// A Mutex is a mutual exclusion lock.
+type Mutex struct {
+	deadlock.Mutex
+}
+
+// An RWMutex is a reader/writer mutual exclusion lock.
+type RWMutex struct {
+	deadlock.RWMutex
 }

@@ -247,6 +247,7 @@ func (b *Batch) fillResults() error {
 			case *roachpb.EndTransactionRequest:
 			case *roachpb.AdminMergeRequest:
 			case *roachpb.AdminSplitRequest:
+			case *roachpb.AdminTransferLeaseRequest:
 			case *roachpb.HeartbeatTxnRequest:
 			case *roachpb.GCRequest:
 			case *roachpb.PushTxnRequest:
@@ -446,7 +447,7 @@ func (b *Batch) Inc(key interface{}, value int64) {
 	b.initResult(1, 1, notRaw, nil)
 }
 
-func (b *Batch) scan(s, e interface{}, maxRows int64, isReverse bool) {
+func (b *Batch) scan(s, e interface{}, isReverse bool) {
 	begin, err := marshalKey(s)
 	if err != nil {
 		b.initResult(0, 0, notRaw, err)
@@ -458,9 +459,9 @@ func (b *Batch) scan(s, e interface{}, maxRows int64, isReverse bool) {
 		return
 	}
 	if !isReverse {
-		b.appendReqs(roachpb.NewScan(roachpb.Key(begin), roachpb.Key(end), maxRows))
+		b.appendReqs(roachpb.NewScan(begin, end))
 	} else {
-		b.appendReqs(roachpb.NewReverseScan(roachpb.Key(begin), roachpb.Key(end), maxRows))
+		b.appendReqs(roachpb.NewReverseScan(begin, end))
 	}
 	b.initResult(1, 0, notRaw, nil)
 }
@@ -468,25 +469,23 @@ func (b *Batch) scan(s, e interface{}, maxRows int64, isReverse bool) {
 // Scan retrieves the key/values between begin (inclusive) and end (exclusive) in
 // ascending order.
 //
-// A new result will be appended to the batch which will contain up to maxRows
-// "rows" (each row is a key/value pair) and Result.Err will indicate success or
-// failure.
+// A new result will be appended to the batch which will contain  "rows" (each
+// row is a key/value pair) and Result.Err will indicate success or failure.
 //
 // key can be either a byte slice or a string.
-func (b *Batch) Scan(s, e interface{}, maxRows int64) {
-	b.scan(s, e, maxRows, false)
+func (b *Batch) Scan(s, e interface{}) {
+	b.scan(s, e, false)
 }
 
 // ReverseScan retrieves the rows between begin (inclusive) and end (exclusive)
 // in descending order.
 //
-// A new result will be appended to the batch which will contain up to maxRows
-// rows (each "row" is a key/value pair) and Result.Err will indicate success or
-// failure.
+// A new result will be appended to the batch which will contain "rows" (each
+// "row" is a key/value pair) and Result.Err will indicate success or failure.
 //
 // key can be either a byte slice or a string.
-func (b *Batch) ReverseScan(s, e interface{}, maxRows int64) {
-	b.scan(s, e, maxRows, true)
+func (b *Batch) ReverseScan(s, e interface{}) {
+	b.scan(s, e, true)
 }
 
 // CheckConsistency creates a batch request to check the consistency of the
@@ -503,7 +502,7 @@ func (b *Batch) CheckConsistency(s, e interface{}, withDiff bool) {
 		b.initResult(0, 0, notRaw, err)
 		return
 	}
-	b.appendReqs(roachpb.NewCheckConsistency(roachpb.Key(begin), roachpb.Key(end), withDiff))
+	b.appendReqs(roachpb.NewCheckConsistency(begin, end, withDiff))
 	b.initResult(1, 0, notRaw, nil)
 }
 
@@ -544,7 +543,7 @@ func (b *Batch) DelRange(s, e interface{}, returnKeys bool) {
 		b.initResult(0, 0, notRaw, err)
 		return
 	}
-	b.appendReqs(roachpb.NewDeleteRange(roachpb.Key(begin), roachpb.Key(end), returnKeys))
+	b.appendReqs(roachpb.NewDeleteRange(begin, end, returnKeys))
 	b.initResult(1, 0, notRaw, nil)
 }
 
@@ -579,6 +578,24 @@ func (b *Batch) adminSplit(splitKey interface{}) {
 		},
 	}
 	req.SplitKey = k
+	b.appendReqs(req)
+	b.initResult(1, 0, notRaw, nil)
+}
+
+// adminTransferLease is only exported on DB. It is here for symmetry with the
+// other operations.
+func (b *Batch) adminTransferLease(key interface{}, target roachpb.StoreID) {
+	k, err := marshalKey(key)
+	if err != nil {
+		b.initResult(0, 0, notRaw, err)
+		return
+	}
+	req := &roachpb.AdminTransferLeaseRequest{
+		Span: roachpb.Span{
+			Key: k,
+		},
+		Target: target,
+	}
 	b.appendReqs(req)
 	b.initResult(1, 0, notRaw, nil)
 }

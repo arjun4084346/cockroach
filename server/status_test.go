@@ -32,11 +32,14 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/base"
 	"github.com/cockroachdb/cockroach/build"
 	"github.com/cockroachdb/cockroach/gossip"
 	"github.com/cockroachdb/cockroach/keys"
 	"github.com/cockroachdb/cockroach/roachpb"
+	"github.com/cockroachdb/cockroach/rpc"
 	"github.com/cockroachdb/cockroach/server/serverpb"
 	"github.com/cockroachdb/cockroach/server/status"
 	"github.com/cockroachdb/cockroach/testutils/serverutils"
@@ -45,6 +48,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/leaktest"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/retry"
+	"github.com/cockroachdb/cockroach/util/stop"
 	"github.com/cockroachdb/cockroach/util/timeutil"
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/gogo/protobuf/proto"
@@ -170,24 +174,24 @@ func getRequestReader(t *testing.T, ts serverutils.TestServerInterface, path str
 		req.Header.Set(util.AcceptHeader, util.JSONContentType)
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			log.Infof("could not GET %s - %s", url, err)
+			log.Infof(context.Background(), "could not GET %s - %s", url, err)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
-				log.Infof("could not read body for %s - %s", url, err)
+				log.Infof(context.Background(), "could not read body for %s - %s", url, err)
 				continue
 			}
-			log.Infof("could not GET %s - statuscode: %d - body: %s", url, resp.StatusCode, body)
+			log.Infof(context.Background(), "could not GET %s - statuscode: %d - body: %s", url, resp.StatusCode, body)
 			continue
 		}
 		returnedContentType := resp.Header.Get(util.ContentTypeHeader)
 		if returnedContentType != util.JSONContentType {
-			log.Infof("unexpected content type: %v", returnedContentType)
+			log.Infof(context.Background(), "unexpected content type: %v", returnedContentType)
 			continue
 		}
-		log.Infof("OK response from %s", url)
+		log.Infof(context.Background(), "OK response from %s", url)
 		return resp.Body
 	}
 	t.Fatalf("There was an error retrieving %s", url)
@@ -201,7 +205,7 @@ func getRequest(t *testing.T, ts serverutils.TestServerInterface, path string) [
 	defer respBody.Close()
 	body, err := ioutil.ReadAll(respBody)
 	if err != nil {
-		log.Infof("could not read body for %s - %s", path, err)
+		log.Infof(context.Background(), "could not read body for %s - %s", path, err)
 		return nil
 	}
 	return body
@@ -246,6 +250,9 @@ func startServer(t *testing.T) serverutils.TestServerInterface {
 // correctly.
 func TestStatusLocalLogs(t *testing.T) {
 	defer leaktest.AfterTest(t)()
+	if log.V(3) {
+		t.Skip("Test only works with low verbosity levels")
+	}
 	dir, err := ioutil.TempDir("", "local_log_test")
 	if err != nil {
 		t.Fatal(err)
@@ -263,11 +270,11 @@ func TestStatusLocalLogs(t *testing.T) {
 
 	// Log an error which we expect to show up on every log file.
 	timestamp := timeutil.Now().UnixNano()
-	log.Errorf("TestStatusLocalLogFile test message-Error")
+	log.Errorf(context.Background(), "TestStatusLocalLogFile test message-Error")
 	timestampE := timeutil.Now().UnixNano()
-	log.Warningf("TestStatusLocalLogFile test message-Warning")
+	log.Warningf(context.Background(), "TestStatusLocalLogFile test message-Warning")
 	timestampEW := timeutil.Now().UnixNano()
-	log.Infof("TestStatusLocalLogFile test message-Info")
+	log.Infof(context.Background(), "TestStatusLocalLogFile test message-Info")
 	timestampEWI := timeutil.Now().UnixNano()
 
 	type logsWrapper struct {
@@ -504,8 +511,8 @@ func TestRangesResponse(t *testing.T) {
 	for _, ri := range response.Ranges {
 		// Do some simple validation based on the fact that this is a
 		// single-node cluster.
-		if ri.RaftState != "StateLeader" {
-			t.Errorf("expected to be raft leader but was %s", ri.RaftState)
+		if ri.RaftState != "StateLeader" && ri.RaftState != "StateDormant" {
+			t.Errorf("expected to be Raft leader or dormant, but was '%s'", ri.RaftState)
 		}
 		expReplica := roachpb.ReplicaDescriptor{
 			NodeID:    1,
@@ -535,5 +542,75 @@ func TestRaftDebug(t *testing.T) {
 	}
 	if len(resp.Ranges) == 0 {
 		t.Errorf("didn't get any ranges")
+	}
+}
+
+// TestStatusVars verifies that prometheus metrics are available via the
+// /_status/vars endpoint.
+func TestStatusVars(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	s, _, _ := serverutils.StartServer(t, base.TestServerArgs{})
+	defer s.Stopper().Stop()
+
+	if body, err := getText(s.AdminURL() + "/_status/vars"); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Contains(body, []byte("# TYPE sql_bytesout counter\nsql_bytesout")) {
+		t.Errorf("expected sql_bytesout, got: %s", body)
+	}
+}
+
+func TestSpanStatsResponse(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ts := startServer(t)
+	defer ts.Stopper().Stop()
+
+	httpClient, err := ts.GetHTTPClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var response serverpb.SpanStatsResponse
+	request := serverpb.SpanStatsRequest{
+		NodeID:   "1",
+		StartKey: []byte(roachpb.RKeyMin),
+		EndKey:   []byte(roachpb.RKeyMax),
+	}
+
+	url := ts.AdminURL() + statusPrefix + "span"
+	if err := util.PostJSON(httpClient, url, &request, &response); err != nil {
+		t.Fatal(err)
+	}
+	if a, e := int(response.RangeCount), ExpectedInitialRangeCount(); a != e {
+		t.Errorf("expected %d ranges, found %d", e, a)
+	}
+}
+
+func TestSpanStatsGRPCResponse(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	ts := startServer(t)
+	defer ts.Stopper().Stop()
+
+	rpcStopper := stop.NewStopper()
+	defer rpcStopper.Stop()
+	rpcContext := rpc.NewContext(ts.RPCContext().Context, ts.Clock(), rpcStopper)
+	request := serverpb.SpanStatsRequest{
+		NodeID:   "1",
+		StartKey: []byte(roachpb.RKeyMin),
+		EndKey:   []byte(roachpb.RKeyMax),
+	}
+
+	url := ts.ServingAddr()
+	conn, err := rpcContext.GRPCDial(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := serverpb.NewStatusClient(conn)
+
+	response, err := client.SpanStats(context.Background(), &request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, e := int(response.RangeCount), ExpectedInitialRangeCount(); a != e {
+		t.Errorf("expected %d ranges, found %d", e, a)
 	}
 }

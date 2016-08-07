@@ -26,6 +26,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/dustin/go-humanize"
 	"github.com/elastic/gosigar"
 
@@ -81,9 +83,10 @@ type Context struct {
 	// in zone configs.
 	Attrs string
 
-	// JoinUsing is a comma-separated list of node addresses that
-	// act as bootstrap hosts for connecting to the gossip network.
-	JoinUsing string
+	// JoinList is a list of node addresses that act as bootstrap hosts for
+	// connecting to the gossip network. Each item in the list can actually be
+	// multiple comma-separated addresses, kept for backward-compatibility.
+	JoinList JoinListType
 
 	// CacheSize is the amount of memory in bytes to use for caching data.
 	// The value is split evenly between the stores if there are more than one.
@@ -176,7 +179,7 @@ func GetTotalMemory() (int64, error) {
 		var buf []byte
 		if buf, err = ioutil.ReadFile(defaultCGroupMemPath); err != nil {
 			if log.V(1) {
-				log.Infof("can't read available memory from cgroups (%s), using system memory %s instead", err,
+				log.Infof(context.TODO(), "can't read available memory from cgroups (%s), using system memory %s instead", err,
 					humanizeutil.IBytes(totalMem))
 			}
 			return totalMem, nil
@@ -184,14 +187,14 @@ func GetTotalMemory() (int64, error) {
 		var cgAvlMem uint64
 		if cgAvlMem, err = strconv.ParseUint(strings.TrimSpace(string(buf)), 10, 64); err != nil {
 			if log.V(1) {
-				log.Infof("can't parse available memory from cgroups (%s), using system memory %s instead", err,
+				log.Infof(context.TODO(), "can't parse available memory from cgroups (%s), using system memory %s instead", err,
 					humanizeutil.IBytes(totalMem))
 			}
 			return totalMem, nil
 		}
 		if cgAvlMem > math.MaxInt64 {
 			if log.V(1) {
-				log.Infof("available memory from cgroups is too large and unsupported %s using system memory %s instead",
+				log.Infof(context.TODO(), "available memory from cgroups is too large and unsupported %s using system memory %s instead",
 					humanize.IBytes(cgAvlMem), humanizeutil.IBytes(totalMem))
 
 			}
@@ -199,7 +202,7 @@ func GetTotalMemory() (int64, error) {
 		}
 		if cgAvlMem > mem.Total {
 			if log.V(1) {
-				log.Infof("available memory from cgroups %s exceeds system memory %s, using system memory",
+				log.Infof(context.TODO(), "available memory from cgroups %s exceeds system memory %s, using system memory",
 					humanize.IBytes(cgAvlMem), humanizeutil.IBytes(totalMem))
 			}
 			return totalMem, nil
@@ -210,24 +213,31 @@ func GetTotalMemory() (int64, error) {
 	return totalMem, nil
 }
 
-// setOpenFileLimit sets the current limit for open file descriptors to the max
+// setOpenFileLimit sets the soft limit for open file descriptors to the hard
 // limit if needed. Returns an error if the hard limit is too low. Returns the
 // value to set maxOpenFiles to for each store.
+// Minimum - 256 per store, 256 saved for networking
+// Constrained - 256 saved for networking, rest divided evenly per store
+// Constrained (network only) - 5000 per store, rest saved for networking
+// Recommended - 5000 per store, 5000 for network
+// Also, please note that current and max limits are commonly referred to as
+// the soft and hard limits respectively.
 func setOpenFileLimit(physicalStoreCount int) (int, error) {
 	minimumOpenFileLimit := uint64(physicalStoreCount*engine.MinimumMaxOpenFiles + minimumNetworkFileDescriptors)
+	networkConstrainedFileLimit := uint64(physicalStoreCount*engine.DefaultMaxOpenFiles + minimumNetworkFileDescriptors)
 	recommendedOpenFileLimit := uint64(physicalStoreCount*engine.DefaultMaxOpenFiles + recommendedNetworkFileDescriptors)
 	// TODO(bram): Test this out on windows.
 	var rLimit syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
 		if log.V(1) {
-			log.Infof("could not get rlimit; setting maxOpenFiles to the default value %d - %s", engine.DefaultMaxOpenFiles, err)
+			log.Infof(context.TODO(), "could not get rlimit; setting maxOpenFiles to the default value %d - %s", engine.DefaultMaxOpenFiles, err)
 		}
 		return engine.DefaultMaxOpenFiles, nil
 	}
 
 	// The max open file descriptor limit is too low.
 	if rLimit.Max < minimumOpenFileLimit {
-		return 0, fmt.Errorf("max open file descriptor limit of %d is under the minimum required %d\n%s",
+		return 0, fmt.Errorf("hard open file descriptor limit of %d is under the minimum required %d\n%s",
 			rLimit.Max,
 			minimumOpenFileLimit,
 			productionSettingsWebpage)
@@ -249,7 +259,7 @@ func setOpenFileLimit(physicalStoreCount int) (int, error) {
 	}
 	if rLimit.Cur < newCurrent {
 		if log.V(1) {
-			log.Infof("setting the current limit for open file descriptors %d to %d",
+			log.Infof(context.TODO(), "setting the soft limit for open file descriptors from %d to %d",
 				rLimit.Cur, newCurrent)
 		}
 		rLimit.Cur = newCurrent
@@ -262,13 +272,13 @@ func setOpenFileLimit(physicalStoreCount int) (int, error) {
 			return 0, err
 		}
 		if log.V(1) {
-			log.Infof("current open file descriptor limit is now %d", rLimit.Cur)
+			log.Infof(context.TODO(), "soft open file descriptor limit is now %d", rLimit.Cur)
 		}
 	}
 
 	// The current open file descriptor limit is still too low.
 	if rLimit.Cur < minimumOpenFileLimit {
-		return 0, fmt.Errorf("current open file descriptor limit of %d is under the minimum required %d and cannot be increased\n%s",
+		return 0, fmt.Errorf("soft open file descriptor limit of %d is under the minimum required %d and cannot be increased\n%s",
 			rLimit.Cur,
 			minimumOpenFileLimit,
 			productionSettingsWebpage)
@@ -281,14 +291,32 @@ func setOpenFileLimit(physicalStoreCount int) (int, error) {
 
 	// We're still below the recommended amount, we should always show a
 	// warning.
-	log.Warningf("current open file descriptor limit %d is under the recommended limit %d; this may decrease performance\n%s",
+	log.Warningf(context.TODO(), "soft open file descriptor limit %d is under the recommended limit %d; this may decrease performance\n%s",
 		rLimit.Cur,
 		recommendedOpenFileLimit,
 		productionSettingsWebpage)
 
+	// if we have no physical stores, return 0.
+	if physicalStoreCount == 0 {
+		return 0, nil
+	}
+
+	// If we have more than enough file descriptors to hit the recommend number
+	// for each store, than only constrain the network ones by giving the stores
+	// their full recommended number.
+	if rLimit.Cur >= networkConstrainedFileLimit {
+		return engine.DefaultMaxOpenFiles, nil
+	}
+
 	// Always sacrifice all but the minimum needed network descriptors to be
 	// used by the stores.
 	return int(rLimit.Cur-minimumNetworkFileDescriptors) / physicalStoreCount, nil
+}
+
+// SetOpenFileLimitForOneStore sets the soft limit for open file descriptors
+// when there is only one store.
+func SetOpenFileLimitForOneStore() (int, error) {
+	return setOpenFileLimit(1)
 }
 
 // MakeContext returns a Context with default values.
@@ -371,9 +399,9 @@ func (ctx *Context) InitStores(stopper *stop.Stopper) error {
 	}
 
 	if len(ctx.Engines) == 1 {
-		log.Infof("1 storage engine initialized")
+		log.Infof(context.TODO(), "1 storage engine initialized")
 	} else {
-		log.Infof("%d storage engines initialized", len(ctx.Engines))
+		log.Infof(context.TODO(), "%d storage engines initialized", len(ctx.Engines))
 	}
 	return nil
 }
@@ -416,20 +444,21 @@ func (ctx *Context) readEnvironmentVariables() {
 	ctx.ReservationsEnabled = envutil.EnvOrDefaultBool("reservations_enabled", ctx.ReservationsEnabled)
 }
 
-// parseGossipBootstrapResolvers parses a comma-separated list of
-// gossip bootstrap resolvers.
+// parseGossipBootstrapResolvers parses list of gossip bootstrap resolvers.
 func (ctx *Context) parseGossipBootstrapResolvers() ([]resolver.Resolver, error) {
 	var bootstrapResolvers []resolver.Resolver
-	addresses := strings.Split(ctx.JoinUsing, ",")
-	for _, address := range addresses {
-		if len(address) == 0 {
-			continue
+	for _, commaSeparatedAddresses := range ctx.JoinList {
+		addresses := strings.Split(commaSeparatedAddresses, ",")
+		for _, address := range addresses {
+			if len(address) == 0 {
+				continue
+			}
+			resolver, err := resolver.NewResolver(ctx.Context, address)
+			if err != nil {
+				return nil, err
+			}
+			bootstrapResolvers = append(bootstrapResolvers, resolver)
 		}
-		resolver, err := resolver.NewResolver(ctx.Context, address)
-		if err != nil {
-			return nil, err
-		}
-		bootstrapResolvers = append(bootstrapResolvers, resolver)
 	}
 
 	return bootstrapResolvers, nil

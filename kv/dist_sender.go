@@ -140,7 +140,7 @@ type DistSenderContext struct {
 // Cockroach cluster via the supplied gossip instance. Supplying a
 // DistSenderContext or the fields within is optional. For omitted values, sane
 // defaults will be used.
-func NewDistSender(ctx *DistSenderContext, gossip *gossip.Gossip) *DistSender {
+func NewDistSender(ctx *DistSenderContext, g *gossip.Gossip) *DistSender {
 	if ctx == nil {
 		ctx = &DistSenderContext{}
 	}
@@ -150,7 +150,7 @@ func NewDistSender(ctx *DistSenderContext, gossip *gossip.Gossip) *DistSender {
 	}
 	ds := &DistSender{
 		clock:  clock,
-		gossip: gossip,
+		gossip: g,
 	}
 	if ctx.nodeDescriptor != nil {
 		atomic.StorePointer(&ds.nodeDescriptor, unsafe.Pointer(ctx.nodeDescriptor))
@@ -196,6 +196,25 @@ func NewDistSender(ctx *DistSenderContext, gossip *gossip.Gossip) *DistSender {
 		ds.sendNextTimeout = defaultSendNextTimeout
 	}
 
+	if g != nil {
+		g.RegisterCallback(gossip.KeyFirstRangeDescriptor,
+			func(_ string, value roachpb.Value) {
+				ctx := context.Background()
+				if log.V(1) {
+					var desc roachpb.RangeDescriptor
+					if err := value.GetProto(&desc); err != nil {
+						log.Errorf(ctx, "unable to parse gossipped first range descriptor: %s", err)
+					} else {
+						log.Infof(ctx,
+							"gossipped first range descriptor: %+v", desc.Replicas)
+					}
+				}
+				err := ds.rangeCache.EvictCachedRangeDescriptor(roachpb.RKeyMin, nil, false)
+				if err != nil {
+					log.Warningf(ctx, "failed to evict first range descriptor: %s", err)
+				}
+			})
+	}
 	return ds
 }
 
@@ -306,7 +325,7 @@ func (ds *DistSender) getNodeDescriptor() *roachpb.NodeDescriptor {
 			return nodeDesc
 		}
 	}
-	log.Infof("unable to determine this node's attributes for replica " +
+	log.Infof(context.TODO(), "unable to determine this node's attributes for replica "+
 		"selection; node is most likely bootstrapping")
 	return nil
 }
@@ -427,7 +446,7 @@ func (ds *DistSender) getDescriptors(
 func (ds *DistSender) sendSingleRange(
 	ctx context.Context, ba roachpb.BatchRequest, desc *roachpb.RangeDescriptor,
 ) (*roachpb.BatchResponse, *roachpb.Error) {
-	// Hack: avoid formatting the message passed to Span.LogEvent for
+	// HACK: avoid formatting the message passed to Span.LogEvent for
 	// opentracing.noopSpans. We can't actually tell if we have a noopSpan, but
 	// we can see if the span as a NoopTracer. Note that this particular
 	// invocation is expensive because we're pretty-printing keys.
@@ -450,7 +469,7 @@ func (ds *DistSender) sendSingleRange(
 	// If this request needs to go to a lease holder and we know who that is, move
 	// it to the front.
 	if !(ba.IsReadOnly() && ba.ReadConsistency == roachpb.INCONSISTENT) {
-		if leaseHolder, ok := ds.leaseHolderCache.Lookup(roachpb.RangeID(desc.RangeID)); ok {
+		if leaseHolder, ok := ds.leaseHolderCache.Lookup(desc.RangeID); ok {
 			if i := replicas.FindReplica(leaseHolder.StoreID); i >= 0 {
 				replicas.MoveToFront(i)
 			}
@@ -534,7 +553,7 @@ func (ds *DistSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*roach
 		panic("empty batch")
 	}
 
-	if ba.MaxScanResults != 0 {
+	if ba.MaxSpanRequestKeys != 0 {
 		// Verify that the batch contains only Scan or ReverseScan requests.
 		fwd, rev := false, false
 		for _, req := range ba.Requests {
@@ -554,10 +573,10 @@ func (ds *DistSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*roach
 
 	var rplChunks []*roachpb.BatchResponse
 	parts := ba.Split(false /* don't split ET */)
-	if len(parts) > 1 && ba.MaxScanResults != 0 {
+	if len(parts) > 1 && ba.MaxSpanRequestKeys != 0 {
 		// We already verified above that the batch contains only scan requests of the same type.
 		// Such a batch should never need splitting.
-		panic("batch with MaxScanResults needs splitting")
+		panic("batch with MaxSpanRequestKeys needs splitting")
 	}
 	for len(parts) > 0 {
 		part := parts[0]
@@ -637,7 +656,7 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 		var needAnother bool
 		var pErr *roachpb.Error
 		var finished bool
-		for r := retry.Start(ds.rpcRetryOptions); r.Next(); {
+		for r := retry.StartWithCtx(ctx, ds.rpcRetryOptions); r.Next(); {
 			// Get range descriptor (or, when spanning range, descriptors). Our
 			// error handling below may clear them on certain errors, so we
 			// refresh (likely from the cache) on every retry.
@@ -653,7 +672,7 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 			if err != nil {
 				log.Trace(ctx, "range descriptor lookup failed: "+err.Error())
 				if log.V(1) {
-					log.Warning(err)
+					log.Warning(ctx, err)
 				}
 				pErr = roachpb.NewError(err)
 				continue
@@ -725,10 +744,7 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 				break
 			}
 
-			if log.V(1) {
-				log.Warningf("failed to invoke %s: %s", ba, pErr)
-			}
-			log.Trace(ctx, fmt.Sprintf("reply error: %s", pErr))
+			log.VTracef(1, ctx, "reply error %s: %s", ba, pErr)
 
 			// Error handling: If the error indicates that our range
 			// descriptor is out of date, evict it from the cache and try
@@ -773,7 +789,7 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 				// On addressing errors, don't backoff; retry immediately.
 				r.Reset()
 				if log.V(1) {
-					log.Warning(tErr)
+					log.Warning(ctx, tErr)
 				}
 				continue
 			}
@@ -787,8 +803,10 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 			select {
 			case <-ds.rpcRetryOptions.Closer:
 				return nil, roachpb.NewError(&roachpb.NodeUnavailableError{}), false
+			case <-ctx.Done():
+				return nil, roachpb.NewError(ctx.Err()), false
 			default:
-				log.Fatal("exited retry loop with nil error but finished=false")
+				log.Fatal(ctx, "exited retry loop with nil error but finished=false")
 			}
 		}
 
@@ -805,7 +823,7 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 			}
 		}
 
-		if ba.MaxScanResults > 0 {
+		if ba.MaxSpanRequestKeys > 0 {
 			// Count how many results we received.
 			var numResults int64
 			for _, resp := range curReply.Responses {
@@ -813,11 +831,11 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 					numResults += cResp.Count()
 				}
 			}
-			if numResults > ba.MaxScanResults {
-				panic(fmt.Sprintf("received %d results, limit was %d", numResults, ba.MaxScanResults))
+			if numResults > ba.MaxSpanRequestKeys {
+				panic(fmt.Sprintf("received %d results, limit was %d", numResults, ba.MaxSpanRequestKeys))
 			}
-			ba.MaxScanResults -= numResults
-			if ba.MaxScanResults == 0 {
+			ba.MaxSpanRequestKeys -= numResults
+			if ba.MaxSpanRequestKeys == 0 {
 				// We are done with this batch. Some requests might have NoopResponses; we must
 				// replace them with empty responses of the proper type.
 				for i, req := range ba.Requests {
@@ -836,65 +854,6 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 					br.Responses[i] = union
 				}
 				return br, nil, false
-			}
-		}
-
-		// If this request has a bound (such as MaxResults in ScanRequest) and
-		// we are going to query at least one more range, check whether enough
-		// rows have been retrieved.
-		if needAnother {
-			// Start with the assumption that all requests are saturated.
-			// Below, we look at each and decide whether that's true.
-			// Everything that is indeed saturated is "masked out" from the
-			// batch request; only if that's all requests does needAnother
-			// remain false.
-			needAnother = false
-			if br == nil {
-				// Clone ba.Requests. This is because we're multi-range, and
-				// some requests may be bounded, which could lead to them being
-				// masked out once they're saturated. We don't want to risk
-				// removing requests that way in the "master copy" since that
-				// could lead to omitting requests in certain retry scenarios.
-				ba.Requests = append([]roachpb.RequestUnion(nil), ba.Requests...)
-			}
-			for i, union := range ba.Requests {
-				args := union.GetInner()
-				if _, ok := args.(*roachpb.NoopRequest); ok {
-					// NoopRequests are skipped.
-					continue
-				}
-				boundedArg, ok := args.(roachpb.Bounded)
-				if !ok {
-					// Non-bounded request. We will have to continue querying
-					// until this request is satisfied. This request might
-					// have already been satisfied at this stage but we have
-					// to be pessimistic here.
-					needAnother = true
-					continue
-				}
-				prevBound := boundedArg.GetBound()
-				cReply, ok := curReply.Responses[i].GetInner().(roachpb.Countable)
-				if !ok || prevBound <= 0 {
-					// Request bounded, but without max results. Again, will
-					// need to query everything we can. The case in which the reply
-					// isn't countable occurs when the request wasn't active for
-					// that range (since it didn't apply to it), so the response
-					// is a NoopResponse.
-					needAnother = true
-					continue
-				}
-				nextBound := prevBound - cReply.Count()
-				if nextBound <= 0 {
-					// We've hit max results for this piece of the batch. Mask
-					// it out (we've copied the requests slice above, so this
-					// is kosher).
-					union := &ba.Requests[i] // avoid working on copy
-					union.MustSetInner(&noopRequest)
-					continue
-				}
-				// The request isn't saturated yet.
-				needAnother = true
-				boundedArg.SetBound(nextBound)
 			}
 		}
 
@@ -923,13 +882,9 @@ func (ds *DistSender) sendChunk(ctx context.Context, ba roachpb.BatchRequest) (*
 			return nil, roachpb.NewError(err), false
 		}
 
-		// It's possible that the key update has created an empty interval,
-		// indicating that we're done. For example, a bounded scan could have
-		// been masked out as saturated, while an unbounded request that has
-		// completed could have been the reason for needing the next
-		// descriptor (needAnother=true); we now have rs.Key=KeyMax.
+		// key cannot be less that the end key.
 		if !rs.Key.Less(rs.EndKey) {
-			return br, nil, false
+			panic(fmt.Sprintf("start key %s is less than %s", rs.Key, rs.EndKey))
 		}
 
 		log.Trace(ctx, "querying next range")
@@ -963,6 +918,10 @@ func (ds *DistSender) sendToReplicas(opts SendOptions,
 		return nil, err
 	}
 	defer transport.Close()
+	if transport.IsExhausted() {
+		return nil, roachpb.NewSendError(
+			fmt.Sprintf("sending to all %d replicas failed", len(replicas)))
+	}
 
 	// Send the first request.
 	pending := 1
@@ -990,9 +949,9 @@ func (ds *DistSender) sendToReplicas(opts SendOptions,
 			err := call.Err
 			if err == nil {
 				if log.V(2) {
-					log.Infof("RPC reply: %+v", call.Reply)
+					log.Infof(context.TODO(), "RPC reply: %+v", call.Reply)
 				} else if log.V(1) && call.Reply.Error != nil {
-					log.Infof("application error: %s", call.Reply.Error)
+					log.Infof(context.TODO(), "application error: %s", call.Reply.Error)
 				}
 
 				if !ds.handlePerReplicaError(rangeID, call.Reply.Error) {
@@ -1008,12 +967,12 @@ func (ds *DistSender) sendToReplicas(opts SendOptions,
 				// information than a RangeNotFound).
 				err = call.Reply.Error.GoError()
 			} else if log.V(1) {
-				log.Warningf("RPC error: %s", err)
+				log.Warningf(context.TODO(), "RPC error: %s", err)
 			}
 
 			// Send to additional replicas if available.
 			if !transport.IsExhausted() {
-				log.Trace(opts.Context, fmt.Sprintf("error, trying next peer: %s", err))
+				log.Tracef(opts.Context, "error, trying next peer: %s", err)
 				pending++
 				transport.SendNext(done)
 			}
@@ -1058,12 +1017,12 @@ func (ds *DistSender) updateLeaseHolderCache(
 	if log.V(1) {
 		if oldLeaseHolder, ok := ds.leaseHolderCache.Lookup(rangeID); ok {
 			if (newLeaseHolder == roachpb.ReplicaDescriptor{}) {
-				log.Infof("range %d: evicting cached lease holder %+v", rangeID, oldLeaseHolder)
+				log.Infof(context.TODO(), "range %d: evicting cached lease holder %+v", rangeID, oldLeaseHolder)
 			} else if newLeaseHolder != oldLeaseHolder {
-				log.Infof("range %d: replacing cached lease holder %+v with %+v", rangeID, oldLeaseHolder, newLeaseHolder)
+				log.Infof(context.TODO(), "range %d: replacing cached lease holder %+v with %+v", rangeID, oldLeaseHolder, newLeaseHolder)
 			}
 		} else {
-			log.Infof("range %d: caching new lease holder %+v", rangeID, newLeaseHolder)
+			log.Infof(context.TODO(), "range %d: caching new lease holder %+v", rangeID, newLeaseHolder)
 		}
 	}
 	ds.leaseHolderCache.Update(rangeID, newLeaseHolder)

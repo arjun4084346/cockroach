@@ -19,7 +19,6 @@ package kv
 
 import (
 	"fmt"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,6 +35,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/metric"
 	"github.com/cockroachdb/cockroach/util/stop"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/cockroachdb/cockroach/util/timeutil"
 	"github.com/cockroachdb/cockroach/util/tracing"
 	"github.com/cockroachdb/cockroach/util/uuid"
@@ -150,7 +150,7 @@ type TxnCoordSender struct {
 	clock             *hlc.Clock
 	heartbeatInterval time.Duration
 	clientTimeout     time.Duration
-	sync.Mutex                                   // protects txns and txnStats
+	syncutil.Mutex                               // protects txns and txnStats
 	txns              map[uuid.UUID]*txnMetadata // txn key to metadata
 	linearizable      bool                       // enables linearizable behaviour
 	tracer            opentracing.Tracer
@@ -236,7 +236,7 @@ func (tc *TxnCoordSender) startStats() {
 			rMax := restarts.Max()
 			num := durations.TotalCount()
 
-			log.Infof(
+			log.Infof(context.TODO(),
 				"txn coordinator: %.2f txn/sec, %.2f/%.2f/%.2f/%.2f %%cmmt/cmmt1pc/abrt/abnd, %s/%s/%s avg/σ/max duration, %.1f/%.1f/%d avg/σ/max restarts (%d samples)",
 				totalRate, pCommitted, pCommitted1PC, pAborted, pAbandoned,
 				util.TruncateDuration(time.Duration(dMean), res),
@@ -343,7 +343,9 @@ func (tc *TxnCoordSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*r
 			})
 			// TODO(peter): Populate DistinctSpans on all batches, not just batches
 			// which contain an EndTransactionRequest.
-			ba.Header.DistinctSpans = roachpb.MergeSpans(&et.IntentSpans) && distinctSpans
+			var distinct bool
+			et.IntentSpans, distinct = roachpb.MergeSpans(et.IntentSpans)
+			ba.Header.DistinctSpans = distinct && distinctSpans
 			if len(et.IntentSpans) == 0 {
 				// If there aren't any intents, then there's factually no
 				// transaction to end. Read-only txns have all of their state
@@ -360,8 +362,7 @@ func (tc *TxnCoordSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*r
 
 		if hasET && log.V(1) {
 			for _, intent := range et.IntentSpans {
-				log.Trace(ctx, fmt.Sprintf("intent: [%s,%s)",
-					intent.Key, intent.EndKey))
+				log.Tracef(ctx, "intent: [%s,%s)", intent.Key, intent.EndKey)
 			}
 		}
 	}
@@ -379,7 +380,7 @@ func (tc *TxnCoordSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*r
 		}
 
 		if pErr = tc.updateState(startNS, ctx, ba, br, pErr); pErr != nil {
-			log.Trace(ctx, fmt.Sprintf("error: %s", pErr))
+			log.Tracef(ctx, "error: %s", pErr)
 			return nil, pErr
 		}
 	}
@@ -407,7 +408,7 @@ func (tc *TxnCoordSender) Send(ctx context.Context, ba roachpb.BatchRequest) (*r
 	if tc.linearizable && sleepNS > 0 {
 		defer func() {
 			if log.V(1) {
-				log.Infof("%v: waiting %s on EndTransaction for linearizability", br.Txn.ID.Short(), util.TruncateDuration(sleepNS, time.Millisecond))
+				log.Infof(ctx, "%v: waiting %s on EndTransaction for linearizability", br.Txn.ID.Short(), util.TruncateDuration(sleepNS, time.Millisecond))
 			}
 			time.Sleep(sleepNS)
 		}()
@@ -564,6 +565,7 @@ func (tc *TxnCoordSender) unregisterTxnLocked(txnID uuid.UUID) (
 // own associated lifetime and we're ignoring all but the first. It happens now
 // that we pass the same one in every request, but it's brittle to rely on this
 // forever.
+// TODO(wiz): Update (*DBServer).Batch to not use context.TODO().
 func (tc *TxnCoordSender) heartbeatLoop(ctx context.Context, txnID uuid.UUID) {
 	var tickChan <-chan time.Time
 	{
@@ -575,7 +577,7 @@ func (tc *TxnCoordSender) heartbeatLoop(ctx context.Context, txnID uuid.UUID) {
 		tc.Lock()
 		duration, restarts, status := tc.unregisterTxnLocked(txnID)
 		tc.Unlock()
-		tc.updateStats(duration, int64(restarts), status, false)
+		tc.updateStats(duration, restarts, status, false)
 	}()
 
 	var closer <-chan struct{}
@@ -627,9 +629,7 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 	tc.Lock()
 	txnMeta := tc.txns[txnID]
 	// Clone the intents and the txn to avoid data races.
-	txnMeta.keys = append([]roachpb.Span(nil), txnMeta.keys...)
-	roachpb.MergeSpans(&txnMeta.keys)
-	intentSpans := txnMeta.keys
+	intentSpans, _ := roachpb.MergeSpans(append([]roachpb.Span(nil), txnMeta.keys...))
 	txnMeta.keys = nil
 	txn := txnMeta.txn.Clone()
 	tc.Unlock()
@@ -660,11 +660,11 @@ func (tc *TxnCoordSender) tryAsyncAbort(txnID uuid.UUID) {
 		// before the goroutine.
 		if _, pErr := tc.wrapped.Send(context.Background(), ba); pErr != nil {
 			if log.V(1) {
-				log.Warningf("abort due to inactivity failed for %s: %s ", txn, pErr)
+				log.Warningf(context.TODO(), "abort due to inactivity failed for %s: %s ", txn, pErr)
 			}
 		}
 	}); err != nil {
-		log.Warning(err)
+		log.Warning(context.TODO(), err)
 	}
 }
 
@@ -689,7 +689,7 @@ func (tc *TxnCoordSender) heartbeat(ctx context.Context, txnID uuid.UUID) bool {
 	// instead of a timeout.
 	if ctx.Done() == nil && hasAbandoned {
 		if log.V(1) {
-			log.Infof("transaction %s abandoned; stopping heartbeat", txnMeta.txn)
+			log.Infof(ctx, "transaction %s abandoned; stopping heartbeat", txnMeta.txn)
 		}
 		tc.tryAsyncAbort(txnID)
 		return false
@@ -713,7 +713,7 @@ func (tc *TxnCoordSender) heartbeat(ctx context.Context, txnID uuid.UUID) bool {
 	// transaction record at all, we're going to have to assume we're aborted
 	// as well.
 	if pErr != nil {
-		log.Warningf("heartbeat to %s failed: %s", txn, pErr)
+		log.Warningf(ctx, "heartbeat to %s failed: %s", txn, pErr)
 		// We're not going to let the client carry out additional requests, so
 		// try to clean up.
 		tc.tryAsyncAbort(*txn.ID)
@@ -925,7 +925,7 @@ func (tc *TxnCoordSender) updateState(
 func (tc *TxnCoordSender) resendWithTxn(ba roachpb.BatchRequest) (*roachpb.BatchResponse, *roachpb.Error) {
 	// Run a one-off transaction with that single command.
 	if log.V(1) {
-		log.Infof("%s: auto-wrapping in txn and re-executing: ", ba)
+		log.Infof(context.TODO(), "%s: auto-wrapping in txn and re-executing: ", ba)
 	}
 	// TODO(bdarnell): need to be able to pass other parts of DBContext
 	// through here.

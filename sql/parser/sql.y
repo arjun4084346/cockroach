@@ -204,6 +204,9 @@ func (u *sqlSymUnion) tblExpr() TableExpr {
 func (u *sqlSymUnion) tblExprs() TableExprs {
     return u.val.(TableExprs)
 }
+func (u *sqlSymUnion) from() *From {
+    return u.val.(*From)
+}
 func (u *sqlSymUnion) joinCond() JoinCond {
     if joinCond, ok := u.val.(JoinCond); ok {
         return joinCond
@@ -379,7 +382,8 @@ func (u *sqlSymUnion) interleave() *InterleaveDef {
 %type <FamilyElemList> family_params
 %type <[]string> name_list opt_name_list
 %type <empty> opt_array_bounds
-%type <TableExprs> from_clause from_list update_from_clause
+%type <*From> from_clause update_from_clause
+%type <TableExprs> from_list
 %type <QualifiedNames> qualified_name_list
 %type <QualifiedNames> indirect_name_or_glob_list
 %type <*QualifiedName> any_name
@@ -1083,11 +1087,11 @@ revoke_stmt:
 privilege_target:
   indirect_name_or_glob_list
   {
-    $$.val = TargetList{Tables: QualifiedNames($1.qnames())}
+    $$.val = TargetList{Tables: $1.qnames()}
   }
 | TABLE indirect_name_or_glob_list
   {
-    $$.val = TargetList{Tables: QualifiedNames($2.qnames())}
+    $$.val = TargetList{Tables: $2.qnames()}
   }
 |  DATABASE name_list
   {
@@ -1676,7 +1680,14 @@ constraint_elem:
     }
   }
 | FOREIGN KEY '(' name_list ')' REFERENCES qualified_name
-    opt_column_list key_match key_actions { unimplemented() }
+    opt_column_list key_match key_actions
+  {
+    $$.val = &ForeignKeyConstraintTableDef{
+      Table: $7.qname(),
+      FromCols: $4.strs(),
+      ToCols: $8.strs(),
+    }
+  }
 
 storing:
   COVERING
@@ -2280,7 +2291,7 @@ simple_select:
   {
     $$.val = &SelectClause{
       Exprs:   $3.selExprs(),
-      From:    $4.tblExprs(),
+      From:    $4.from(),
       Where:   newWhere(astWhere, $5.expr()),
       GroupBy: $6.groupBy(),
       Having:  newWhere(astHaving, $7.expr()),
@@ -2293,7 +2304,7 @@ simple_select:
     $$.val = &SelectClause{
       Distinct: $2.bool(),
       Exprs:    $3.selExprs(),
-      From:     $4.tblExprs(),
+      From:     $4.from(),
       Where:    newWhere(astWhere, $5.expr()),
       GroupBy:  $6.groupBy(),
       Having:   newWhere(astHaving, $7.expr()),
@@ -2304,7 +2315,7 @@ simple_select:
   {
     $$.val = &SelectClause{
       Exprs:       SelectExprs{starSelectExpr()},
-      From:        TableExprs{&AliasedTableExpr{Expr: $2.qname()}},
+      From:        &From{Tables: TableExprs{&AliasedTableExpr{Expr: $2.qname()}}},
       tableSelect: true,
     }
   }
@@ -2547,13 +2558,13 @@ values_clause:
 //  where_clause  - qualifications for joins or restrictions
 
 from_clause:
-  FROM from_list
+  FROM from_list opt_as_of_clause
   {
-    $$.val = $2.tblExprs()
+    $$.val = &From{Tables: $2.tblExprs(), AsOf: $3.asOfClause()}
   }
 | /* EMPTY */
   {
-    $$.val = TableExprs(nil)
+    $$.val = &From{}
   }
 
 from_list:
@@ -2618,9 +2629,9 @@ opt_index_hints:
 
 // table_ref is where an alias clause can be attached.
 table_ref:
-  relation_expr opt_index_hints opt_alias_clause opt_as_of_clause
+  relation_expr opt_index_hints opt_alias_clause
   {
-    $$.val = &AliasedTableExpr{Expr: $1.qname(), Hints: $2.indexHints(), As: $3.aliasClause(), AsOf: $4.asOfClause()}
+    $$.val = &AliasedTableExpr{Expr: $1.qname(), Hints: $2.indexHints(), As: $3.aliasClause()}
   }
 | select_with_parens opt_alias_clause
   {
@@ -3014,7 +3025,12 @@ bit_with_length:
       sqllex.Error(err.Error())
       return 1
     }
-    $$.val = newIntBitType(int(n))
+    bit, err := newIntBitType(int(n))
+    if err != nil {
+      sqllex.Error(err.Error())
+      return 1
+    }
+    $$.val = bit
   }
 
 bit_without_length:

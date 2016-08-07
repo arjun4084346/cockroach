@@ -18,10 +18,11 @@
 package storage
 
 import (
+	"bytes"
 	"fmt"
-	"sync"
 
-	"github.com/cockroachdb/cockroach/roachpb"
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/security"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/coreos/etcd/raft"
@@ -45,104 +46,103 @@ func init() {
 // This file is named raft.go instead of something like logger.go because this
 // file's name is used to determine the vmodule parameter: --vmodule=raft=1
 type raftLogger struct {
-	rangeID roachpb.RangeID
+	stringer fmt.Stringer
 }
 
 // logPrefix returns a string that will prefix logs emitted by
 // raftLogger. Bad things will happen if this method returns a string
 // containing unescaped '%' characters.
 func (r *raftLogger) logPrefix() string {
-	if r.rangeID != 0 {
-		return fmt.Sprintf("[range %d] ", r.rangeID)
+	if r.stringer != nil {
+		return fmt.Sprintf("%s: ", r.stringer)
 	}
 	return ""
 }
 
 func (r *raftLogger) Debug(v ...interface{}) {
 	if log.V(3) {
-		log.InfofDepth(1, r.logPrefix(), v...)
+		log.InfofDepth(context.TODO(), 1, r.logPrefix(), v...)
 	}
 }
 
 func (r *raftLogger) Debugf(format string, v ...interface{}) {
 	if log.V(3) {
-		log.InfofDepth(1, r.logPrefix()+format, v...)
+		log.InfofDepth(context.TODO(), 1, r.logPrefix()+format, v...)
 	}
 }
 
 func (r *raftLogger) Info(v ...interface{}) {
 	if log.V(2) {
-		log.InfofDepth(1, r.logPrefix(), v...)
+		log.InfofDepth(context.TODO(), 1, r.logPrefix(), v...)
 	}
 }
 
 func (r *raftLogger) Infof(format string, v ...interface{}) {
 	if log.V(2) {
-		log.InfofDepth(1, r.logPrefix()+format, v...)
+		log.InfofDepth(context.TODO(), 1, r.logPrefix()+format, v...)
 	}
 }
 
 func (r *raftLogger) Warning(v ...interface{}) {
-	log.WarningfDepth(1, r.logPrefix(), v...)
+	log.WarningfDepth(context.TODO(), 1, r.logPrefix(), v...)
 }
 
 func (r *raftLogger) Warningf(format string, v ...interface{}) {
-	log.WarningfDepth(1, r.logPrefix()+format, v...)
+	log.WarningfDepth(context.TODO(), 1, r.logPrefix()+format, v...)
 }
 
 func (r *raftLogger) Error(v ...interface{}) {
-	log.ErrorfDepth(1, r.logPrefix(), v...)
+	log.ErrorfDepth(context.TODO(), 1, r.logPrefix(), v...)
 }
 
 func (r *raftLogger) Errorf(format string, v ...interface{}) {
-	log.ErrorfDepth(1, r.logPrefix()+format, v...)
+	log.ErrorfDepth(context.TODO(), 1, r.logPrefix()+format, v...)
 }
 
 func (r *raftLogger) Fatal(v ...interface{}) {
-	log.FatalfDepth(1, r.logPrefix(), v...)
+	log.FatalfDepth(context.TODO(), 1, r.logPrefix(), v...)
 }
 
 func (r *raftLogger) Fatalf(format string, v ...interface{}) {
-	log.FatalfDepth(1, r.logPrefix()+format, v...)
+	log.FatalfDepth(context.TODO(), 1, r.logPrefix()+format, v...)
 }
 
 func (r *raftLogger) Panic(v ...interface{}) {
 	s := fmt.Sprint(v...)
-	log.ErrorfDepth(1, s)
+	log.ErrorfDepth(context.TODO(), 1, s)
 	panic(s)
 }
 
 func (r *raftLogger) Panicf(format string, v ...interface{}) {
-	log.ErrorfDepth(1, r.logPrefix()+format, v...)
+	log.ErrorfDepth(context.TODO(), 1, r.logPrefix()+format, v...)
 	panic(fmt.Sprintf(r.logPrefix()+format, v...))
 }
 
-var logRaftReadyMu sync.Mutex
-
-func logRaftReady(storeID roachpb.StoreID, rangeID roachpb.RangeID, ready raft.Ready) {
+func logRaftReady(ctx context.Context, prefix fmt.Stringer, ready raft.Ready) {
 	if log.V(5) {
-		// Globally synchronize to avoid interleaving different sets of logs in tests.
-		logRaftReadyMu.Lock()
-		defer logRaftReadyMu.Unlock()
-		log.Infof("store %d: range %d raft ready", storeID, rangeID)
+		var buf bytes.Buffer
 		if ready.SoftState != nil {
-			log.Infof("SoftState updated: %+v", *ready.SoftState)
+			fmt.Fprintf(&buf, "  SoftState updated: %+v\n", *ready.SoftState)
 		}
 		if !raft.IsEmptyHardState(ready.HardState) {
-			log.Infof("HardState updated: %+v", ready.HardState)
+			fmt.Fprintf(&buf, "  HardState updated: %+v\n", ready.HardState)
 		}
 		for i, e := range ready.Entries {
-			log.Infof("New Entry[%d]: %.200s", i, raft.DescribeEntry(e, raftEntryFormatter))
+			fmt.Fprintf(&buf, "  New Entry[%d]: %.200s\n",
+				i, raft.DescribeEntry(e, raftEntryFormatter))
 		}
 		for i, e := range ready.CommittedEntries {
-			log.Infof("Committed Entry[%d]: %.200s", i, raft.DescribeEntry(e, raftEntryFormatter))
+			fmt.Fprintf(&buf, "  Committed Entry[%d]: %.200s\n",
+				i, raft.DescribeEntry(e, raftEntryFormatter))
 		}
 		if !raft.IsEmptySnap(ready.Snapshot) {
-			log.Infof("Snapshot updated: %.200s", ready.Snapshot.String())
+			fmt.Fprintf(&buf, "  Snapshot updated: %.200s\n", ready.Snapshot.String())
 		}
 		for i, m := range ready.Messages {
-			log.Infof("Outgoing Message[%d]: %.200s", i, raft.DescribeMessage(m, raftEntryFormatter))
+			fmt.Fprintf(&buf, "  Outgoing Message[%d]: %.200s\n",
+				i, raft.DescribeMessage(m, raftEntryFormatter))
 		}
+		log.Infof(ctx, "%s raft ready\n%s", prefix, buf.String())
 	}
 }
 

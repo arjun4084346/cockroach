@@ -28,6 +28,8 @@ import (
 	"github.com/cockroachdb/cockroach/storage/engine"
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/hlc"
+	"github.com/cockroachdb/cockroach/util/metric"
+	"github.com/cockroachdb/cockroach/util/retry"
 	"github.com/cockroachdb/cockroach/util/stop"
 	"github.com/cockroachdb/cockroach/util/tracing"
 	"github.com/opentracing/opentracing-go"
@@ -45,18 +47,19 @@ import (
 // Note that the LocalTestCluster is different from server.TestCluster
 // in that although it uses a distributed sender, there is no RPC traffic.
 type LocalTestCluster struct {
-	Manual    *hlc.ManualClock
-	Clock     *hlc.Clock
-	Gossip    *gossip.Gossip
-	Eng       engine.Engine
-	Store     *storage.Store
-	DBContext *client.DBContext
-	DB        *client.DB
-	Stores    *storage.Stores
-	Sender    client.Sender
-	Stopper   *stop.Stopper
-	Latency   time.Duration // sleep for each RPC sent
-	tester    util.Tester
+	Manual            *hlc.ManualClock
+	Clock             *hlc.Clock
+	Gossip            *gossip.Gossip
+	Eng               engine.Engine
+	Store             *storage.Store
+	DBContext         *client.DBContext
+	DB                *client.DB
+	RangeRetryOptions *retry.Options
+	Stores            *storage.Stores
+	Sender            client.Sender
+	Stopper           *stop.Stopper
+	Latency           time.Duration // sleep for each RPC sent
+	tester            util.Tester
 }
 
 // InitSenderFn is a callback used to initiate the txn coordinator (we don't
@@ -85,7 +88,8 @@ func (ltc *LocalTestCluster) Start(t util.Tester, baseCtx *base.Context, initSen
 	ltc.Clock = hlc.NewClock(ltc.Manual.UnixNano)
 	ltc.Stopper = stop.NewStopper()
 	rpcContext := rpc.NewContext(baseCtx, ltc.Clock, ltc.Stopper)
-	ltc.Gossip = gossip.New(rpcContext, nil, ltc.Stopper)
+	server := rpc.NewServer(rpcContext) // never started
+	ltc.Gossip = gossip.New(rpcContext, server, nil, ltc.Stopper, metric.NewRegistry())
 	ltc.Eng = engine.NewInMem(roachpb.Attributes{}, 50<<20, ltc.Stopper)
 
 	ltc.Stores = storage.NewStores(ltc.Clock)
@@ -99,6 +103,9 @@ func (ltc *LocalTestCluster) Start(t util.Tester, baseCtx *base.Context, initSen
 	ltc.DB = client.NewDBWithContext(ltc.Sender, *ltc.DBContext)
 	transport := storage.NewDummyRaftTransport()
 	ctx := storage.TestStoreContext()
+	if ltc.RangeRetryOptions != nil {
+		ctx.RangeRetryOptions = *ltc.RangeRetryOptions
+	}
 	ctx.Clock = ltc.Clock
 	ctx.DB = ltc.DB
 	ctx.Gossip = ltc.Gossip

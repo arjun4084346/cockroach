@@ -40,6 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/metric"
 	"github.com/cockroachdb/cockroach/util/stop"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/pkg/errors"
 )
 
@@ -143,7 +144,7 @@ type Executor struct {
 	// System Config and mutex.
 	systemConfig   config.SystemConfig
 	databaseCache  *databaseCache
-	systemConfigMu sync.RWMutex
+	systemConfigMu syncutil.RWMutex
 	// This uses systemConfigMu in RLocker mode to not block
 	// execution of statements. So don't go on changing state after you've
 	// Wait()ed on it.
@@ -155,6 +156,7 @@ type Executor struct {
 // All fields holding a pointer or an interface are required to create
 // a Executor; the rest will have sane defaults set if omitted.
 type ExecutorContext struct {
+	Context      context.Context
 	DB           *client.DB
 	Gossip       *gossip.Gossip
 	LeaseManager *LeaseManager
@@ -263,6 +265,16 @@ func NewExecutor(ctx ExecutorContext, stopper *stop.Stopper, registry *metric.Re
 	return exec
 }
 
+// NewDummyExecutor creates an empty Executor that is used for certain tests.
+func NewDummyExecutor() *Executor {
+	return &Executor{ctx: ExecutorContext{Context: context.Background()}}
+}
+
+// Ctx returns the Context associated with this Executor.
+func (e *Executor) Ctx() context.Context {
+	return e.ctx.Context
+}
+
 // SetNodeID sets the node ID for the SQL server. This method must be called
 // before actually using the Executor.
 func (e *Executor) SetNodeID(nodeID roachpb.NodeID) {
@@ -295,13 +307,14 @@ func (e *Executor) getSystemConfig() (config.SystemConfig, *databaseCache) {
 // populate the missing types. The column result types are returned (or
 // nil if there are no results).
 func (e *Executor) Prepare(
-	ctx context.Context,
 	query string,
 	session *Session,
 	pinfo parser.PlaceholderTypes,
 ) ([]ResultColumn, error) {
 	if log.V(2) {
-		log.Infof("preparing statement: %s", query)
+		log.Infof(session.Ctx(), "preparing: %s", query)
+	} else if traceSQL {
+		log.Tracef(session.Ctx(), "preparing: %s", query)
 	}
 	stmt, err := parser.ParseOne(query, parser.Syntax(session.Syntax))
 	if err != nil {
@@ -321,7 +334,7 @@ func (e *Executor) Prepare(
 
 	// Prepare needs a transaction because it needs to retrieve db/table
 	// descriptors for type checking.
-	txn := client.NewTxn(ctx, *e.ctx.DB)
+	txn := client.NewTxn(session.Ctx(), *e.ctx.DB)
 	txn.Proto.Isolation = session.DefaultIsolationLevel
 	session.planner.setTxn(txn)
 	defer session.planner.setTxn(nil)
@@ -353,7 +366,7 @@ func (e *Executor) Prepare(
 
 // ExecuteStatements executes the given statement(s) and returns a response.
 func (e *Executor) ExecuteStatements(
-	ctx context.Context, session *Session, stmts string, pinfo *parser.PlaceholderInfo,
+	session *Session, stmts string, pinfo *parser.PlaceholderInfo,
 ) StatementResults {
 
 	session.planner.resetForBatch(e)
@@ -361,7 +374,7 @@ func (e *Executor) ExecuteStatements(
 
 	// Send the Request for SQL execution and set the application-level error
 	// for each result in the reply.
-	return e.execRequest(ctx, session, stmts)
+	return e.execRequest(session, stmts)
 }
 
 // blockConfigUpdates blocks any gossip updates to the system config
@@ -396,7 +409,7 @@ func (e *Executor) waitForConfigUpdate() {
 // Args:
 //  txnState: State about about ongoing transaction (if any). The state will be
 //   updated.
-func (e *Executor) execRequest(ctx context.Context, session *Session, sql string) StatementResults {
+func (e *Executor) execRequest(session *Session, sql string) StatementResults {
 	var res StatementResults
 	txnState := &session.TxnState
 	planMaker := &session.planner
@@ -454,7 +467,7 @@ func (e *Executor) execRequest(ctx context.Context, session *Session, sql string
 					}()
 				}
 			}
-			txnState.reset(ctx, e, session)
+			txnState.reset(session.Ctx(), e, session)
 			txnState.State = Open
 			txnState.autoRetry = true
 			txnState.sqlTimestamp = e.ctx.Clock.PhysicalTime()
@@ -492,7 +505,7 @@ func (e *Executor) execRequest(ctx context.Context, session *Session, sql string
 		}
 		// This is where the magic happens - we ask db to run a KV txn and possibly retry it.
 		txn := txnState.txn // this might be nil if the txn was already aborted.
-		err := txnState.txn.Exec(execOpt, txnClosure)
+		err := txn.Exec(execOpt, txnClosure)
 
 		// Update the Err field of the last result if the error was coming from
 		// auto commit. The error was generated outside of the txn closure, so it was not
@@ -500,12 +513,20 @@ func (e *Executor) execRequest(ctx context.Context, session *Session, sql string
 		if err != nil {
 			lastResult := &results[len(results)-1]
 			if aErr, ok := err.(*client.AutoCommitError); ok {
+				// Until #7881 fixed.
+				if txn == nil {
+					log.Errorf(session.Ctx(), "AutoCommitError on nil txn: %+v, "+
+						"txnState %+v, execOpt %+v, stmts %+v, remaining %+v",
+						err, txnState, execOpt, stmts, remainingStmts)
+				}
 				lastResult.Err = aErr
 				e.txnAbortCount.Inc(1)
-				txnState.txn.CleanupOnError(err)
+				txn.CleanupOnError(err)
 			}
 			if lastResult.Err == nil {
-				log.Fatalf("error (%s) was returned, but it was not set in the last result (%v)", err, lastResult)
+				log.Fatalf(session.Ctx(),
+					"error (%s) was returned, but it was not set in the last result (%v)",
+					err, lastResult)
 			}
 		}
 
@@ -650,8 +671,11 @@ func (e *Executor) execStmtsInCurrentTxn(
 	}
 
 	for i, stmt := range stmts {
+		ctx := planMaker.session.Ctx()
 		if log.V(2) {
-			log.Infof("about to execute sql statement (%d/%d): %s", i+1, len(stmts), stmt)
+			log.Infof(ctx, "executing %d/%d: %s", i+1, len(stmts), stmt)
+		} else if traceSQL {
+			log.Tracef(ctx, "executing %d/%d: %s", i+1, len(stmts), stmt)
 		}
 		txnState.schemaChangers.curStatementIdx = i
 
@@ -919,8 +943,12 @@ func (e *Executor) execStmtInOpenTxn(
 	if txnState.tr != nil {
 		txnState.tr.LazyLog(stmt, true /* sensitive */)
 	}
+
 	result, err := e.execStmt(stmt, planMaker, implicitTxn /* autoCommit */)
 	if err != nil {
+		if traceSQL {
+			log.Tracef(txnState.txn.Context, "ERROR: %v", err)
+		}
 		if txnState.tr != nil {
 			txnState.tr.LazyPrintf("ERROR: %v", err)
 		}
@@ -935,6 +963,9 @@ func (e *Executor) execStmtInOpenTxn(
 			tResult.count = len(result.Rows)
 		}
 		txnState.tr.LazyLog(tResult, false)
+		if traceSQL {
+			log.Tracef(txnState.txn.Context, "%s done", tResult)
+		}
 	}
 	return result, err
 }
@@ -959,7 +990,7 @@ func rollbackSQLTransaction(txnState *txnState, p *planner) Result {
 	err := p.txn.Rollback()
 	result := Result{PGTag: (*parser.RollbackTransaction)(nil).StatementTag()}
 	if err != nil {
-		log.Warningf("txn rollback failed. The error was swallowed: %s", err)
+		log.Warningf(p.ctx(), "txn rollback failed. The error was swallowed: %s", err)
 		result.Err = err
 	}
 	// We're done with this txn.
@@ -1009,6 +1040,7 @@ func commitSQLTransaction(
 			// We're done with this txn.
 			txnState.State = NoTxn
 		}
+		txnState.dumpTrace()
 		txnState.txn = nil
 	}
 	// Reset transaction to prevent running further commands on this planner.
@@ -1241,17 +1273,10 @@ func isAsOf(planMaker *planner, stmt parser.Statement, max hlc.Timestamp) (*hlc.
 	if !ok {
 		return nil, nil
 	}
-	if len(sc.From) != 1 {
+	if sc.From == nil || sc.From.AsOf.Expr == nil {
 		return nil, nil
 	}
-	ate, ok := sc.From[0].(*parser.AliasedTableExpr)
-	if !ok {
-		return nil, nil
-	}
-	if ate.AsOf.Expr == nil {
-		return nil, nil
-	}
-	te, err := ate.AsOf.Expr.TypeCheck(nil, parser.TypeString)
+	te, err := sc.From.AsOf.Expr.TypeCheck(nil, parser.TypeString)
 	if err != nil {
 		return nil, err
 	}

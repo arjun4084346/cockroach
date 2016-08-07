@@ -33,21 +33,22 @@ import (
 	"github.com/cockroachdb/cockroach/testutils"
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/leaktest"
+	"github.com/cockroachdb/cockroach/util/metric"
 	"github.com/cockroachdb/cockroach/util/netutil"
 	"github.com/cockroachdb/cockroach/util/stop"
 )
 
 // startGossip creates and starts a gossip instance.
-func startGossip(nodeID roachpb.NodeID, stopper *stop.Stopper, t *testing.T) *Gossip {
+func startGossip(nodeID roachpb.NodeID, stopper *stop.Stopper, t *testing.T, registry *metric.Registry) *Gossip {
 	rpcContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
 	server := rpc.NewServer(rpcContext)
+	g := New(rpcContext, server, nil, stopper, registry)
 	ln, err := netutil.ListenAndServeGRPC(stopper, server, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := ln.Addr()
-	g := New(rpcContext, nil, stopper)
 	g.SetNodeID(nodeID)
 	if err := g.SetNodeDescriptor(&roachpb.NodeDescriptor{
 		NodeID:  nodeID,
@@ -55,7 +56,7 @@ func startGossip(nodeID roachpb.NodeID, stopper *stop.Stopper, t *testing.T) *Go
 	}); err != nil {
 		t.Fatal(err)
 	}
-	g.start(server, addr)
+	g.start(addr)
 	time.Sleep(time.Millisecond)
 	return g
 }
@@ -97,17 +98,17 @@ func (s *fakeGossipServer) Gossip(stream Gossip_GossipServer) error {
 // startFakeServerGossips creates local gossip instances and remote
 // faked gossip instance. The remote gossip instance launches its
 // faked gossip service just for check the client message.
-func startFakeServerGossips(t *testing.T) (local *Gossip, remote *fakeGossipServer, stopper *stop.Stopper) {
-	stopper = stop.NewStopper()
+func startFakeServerGossips(t *testing.T) (*Gossip, *fakeGossipServer, *stop.Stopper) {
+	stopper := stop.NewStopper()
 	lRPCContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
 	lserver := rpc.NewServer(lRPCContext)
+	local := New(lRPCContext, lserver, nil, stopper, metric.NewRegistry())
 	lln, err := netutil.ListenAndServeGRPC(stopper, lserver, util.TestAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	local = New(lRPCContext, nil, stopper)
-	local.start(lserver, lln.Addr())
+	local.start(lln.Addr())
 
 	rRPCContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
 
@@ -116,25 +117,44 @@ func startFakeServerGossips(t *testing.T) (local *Gossip, remote *fakeGossipServ
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	remote = newFakeGossipServer(rserver, stopper)
+	remote := newFakeGossipServer(rserver, stopper)
 	addr := rln.Addr()
 	remote.nodeAddr = util.MakeUnresolvedAddr(addr.Network(), addr.String())
-	return
+	return local, remote, stopper
+}
+
+func gossipSucceedsSoon(t *testing.T, stopper *stop.Stopper, disconnected chan *client, gossip map[*client]*Gossip, f func() error) {
+	// Use an insecure context since we don't need a valid cert.
+	rpcContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
+
+	for c := range gossip {
+		disconnected <- c
+	}
+
+	util.SucceedsSoon(t, func() error {
+		select {
+		case client := <-disconnected:
+			// If the client wasn't able to connect, restart it.
+			client.start(gossip[client], disconnected, rpcContext, stopper)
+		default:
+		}
+
+		return f()
+	})
 }
 
 // TestClientGossip verifies a client can gossip a delta to the server.
 func TestClientGossip(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
-	local := startGossip(1, stopper, t)
-	remote := startGossip(2, stopper, t)
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	disconnected := make(chan *client, 1)
-	client := newClient(&remote.is.NodeAddr)
+	c := newClient(&remote.is.NodeAddr, makeMetrics(metric.NewRegistry()))
 
 	defer func() {
 		stopper.Stop()
-		if client != <-disconnected {
+		if c != <-disconnected {
 			t.Errorf("expected client disconnect after remote close")
 		}
 	}()
@@ -146,17 +166,9 @@ func TestClientGossip(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Use an insecure context. We're talking to tcp socket which are not in the certs.
-	rpcContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
-	disconnected <- client
-
-	util.SucceedsSoon(t, func() error {
-		select {
-		case <-disconnected:
-			// If the client wasn't able to connect, restart it.
-			client.start(local, disconnected, rpcContext, stopper)
-		default:
-		}
+	gossipSucceedsSoon(t, stopper, disconnected, map[*client]*Gossip{
+		c: local,
+	}, func() error {
 		if _, err := remote.GetInfo("local-key"); err != nil {
 			return err
 		}
@@ -165,6 +177,66 @@ func TestClientGossip(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// TestClientGossipMetrics verifies a that gossip stats are generated.
+func TestClientGossipMetrics(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	stopper := stop.NewStopper()
+	defer stopper.Stop()
+	localRegistry := metric.NewRegistry()
+	local := startGossip(1, stopper, t, localRegistry)
+	remoteRegistry := metric.NewRegistry()
+	remote := startGossip(2, stopper, t, remoteRegistry)
+
+	gossipSucceedsSoon(
+		t, stopper, make(chan *client, 2),
+		map[*client]*Gossip{
+			newClient(&local.is.NodeAddr, makeMetrics(metric.NewRegistry())):  remote,
+			newClient(&remote.is.NodeAddr, makeMetrics(metric.NewRegistry())): local,
+		},
+		func() error {
+			if err := local.AddInfo("local-key", nil, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			if err := remote.AddInfo("remote-key", nil, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+
+			// Infos/Bytes Sent/Received should not be zero.
+			for i, reg := range []*metric.Registry{localRegistry, remoteRegistry} {
+				for _, ratesName := range []string{
+					InfosSentRatesName,
+					InfosReceivedRatesName,
+					BytesSentRatesName,
+					BytesReceivedRatesName,
+				} {
+					counterName := ratesName + "-count"
+					counter := reg.GetCounter(counterName)
+					if counter == nil {
+						return errors.Errorf("%d: missing counter %q", i, counterName)
+					}
+					if count := counter.Count(); count <= 0 {
+						return errors.Errorf("%d: expected metrics counter %q > 0; = %d", i, counterName, count)
+					}
+				}
+			}
+
+			// Since there are two gossip nodes, there should be at least one incoming
+			// and outgoing connection.
+			for i, reg := range []*metric.Registry{localRegistry, remoteRegistry} {
+				for _, name := range []string{} {
+					gauge := reg.GetGauge(name)
+					if gauge == nil {
+						return errors.Errorf("%d: missing gauge %q", i, name)
+					}
+					if count := gauge.Value(); count <= 0 {
+						return errors.Errorf("%d: expected metrics gauge %q > 0; = %d", i, name, count)
+					}
+				}
+			}
+			return nil
+		})
 }
 
 // TestClientNodeID verifies a client's gossip request with correct NodeID.
@@ -177,7 +249,7 @@ func TestClientNodeID(t *testing.T) {
 
 	// Use an insecure context. We're talking to tcp socket which are not in the certs.
 	rpcContext := rpc.NewContext(&base.Context{Insecure: true}, nil, stopper)
-	c := newClient(&remote.nodeAddr)
+	c := newClient(&remote.nodeAddr, makeMetrics(metric.NewRegistry()))
 	disconnected := make(chan *client, 1)
 	disconnected <- c
 
@@ -219,7 +291,7 @@ func TestClientDisconnectLoopback(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	local := startGossip(1, stopper, t)
+	local := startGossip(1, stopper, t, metric.NewRegistry())
 	// startClient requires locks are held, so acquire here.
 	local.mu.Lock()
 	lAddr := local.is.NodeAddr
@@ -242,8 +314,8 @@ func TestClientDisconnectRedundant(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	local := startGossip(1, stopper, t)
-	remote := startGossip(2, stopper, t)
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	// startClient requires locks are held, so acquire here.
 	local.mu.Lock()
 	remote.mu.Lock()
@@ -281,8 +353,8 @@ func TestClientDisallowMultipleConns(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	local := startGossip(1, stopper, t)
-	remote := startGossip(2, stopper, t)
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	local.mu.Lock()
 	remote.mu.Lock()
 	rAddr := remote.is.NodeAddr
@@ -336,13 +408,16 @@ func TestClientRegisterWithInitNodeID(t *testing.T) {
 		}
 
 		var resolvers []resolver.Resolver
-		resolver, _ := resolver.NewResolver(RPCContext.Context, gossipAddr)
+		resolver, err := resolver.NewResolver(RPCContext.Context, gossipAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
 		resolvers = append(resolvers, resolver)
-		gnode := New(RPCContext, resolvers, stopper)
+		gnode := New(RPCContext, server, resolvers, stopper, metric.NewRegistry())
 		// node ID must be non-zero
 		gnode.SetNodeID(roachpb.NodeID(i + 1))
 		g = append(g, gnode)
-		gnode.Start(server, ln.Addr())
+		gnode.Start(ln.Addr())
 	}
 
 	util.SucceedsSoon(t, func() error {
@@ -384,8 +459,8 @@ func TestClientRetryBootstrap(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
-	local := startGossip(1, stopper, t)
-	remote := startGossip(2, stopper, t)
+	local := startGossip(1, stopper, t, metric.NewRegistry())
+	remote := startGossip(2, stopper, t, metric.NewRegistry())
 	remote.mu.Lock()
 	rAddr := remote.is.NodeAddr
 	remote.mu.Unlock()
@@ -402,10 +477,8 @@ func TestClientRetryBootstrap(t *testing.T) {
 	local.manage()
 
 	util.SucceedsSoon(t, func() error {
-		if _, err := remote.GetInfo("local-key"); err != nil {
-			return err
-		}
-		return nil
+		_, err := remote.GetInfo("local-key")
+		return err
 	})
 }
 
@@ -416,12 +489,12 @@ func TestClientForwardUnresolved(t *testing.T) {
 	stopper := stop.NewStopper()
 	defer stopper.Stop()
 	const nodeID = 1
-	local := startGossip(nodeID, stopper, t)
+	local := startGossip(nodeID, stopper, t, metric.NewRegistry())
 	local.mu.Lock()
 	addr := local.is.NodeAddr
 	local.mu.Unlock()
 
-	client := newClient(&addr) // never started
+	client := newClient(&addr, makeMetrics(metric.NewRegistry())) // never started
 
 	newAddr := util.UnresolvedAddr{
 		NetworkField: "tcp",

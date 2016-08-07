@@ -40,7 +40,7 @@ func TestKeySorting(t *testing.T) {
 	if bytes.Compare(localPrefix, Meta1Prefix) >= 0 {
 		t.Fatalf("local key spilling into replicated ranges")
 	}
-	if !bytes.Equal(roachpb.Key(""), roachpb.Key(nil)) || !bytes.Equal(roachpb.Key(""), roachpb.Key(nil)) {
+	if !bytes.Equal(roachpb.Key(""), roachpb.Key(nil)) {
 		t.Fatalf("equality between keys failed")
 	}
 }
@@ -283,7 +283,7 @@ func TestMetaReverseScanBounds(t *testing.T) {
 			expError: "",
 		},
 		{
-			key:      mustAddr(Meta2Prefix),
+			key:      MustAddr(Meta2Prefix),
 			expStart: Meta1Prefix,
 			expEnd:   Meta2Prefix.Next(),
 			expError: "",
@@ -442,7 +442,7 @@ func TestMakeFamilyKey(t *testing.T) {
 	}
 }
 
-func TestMakeSplitKey(t *testing.T) {
+func TestEnsureSafeSplitKey(t *testing.T) {
 	e := func(vals ...uint64) roachpb.Key {
 		var k roachpb.Key
 		for _, v := range vals {
@@ -464,7 +464,7 @@ func TestMakeSplitKey(t *testing.T) {
 		{e(1, 2, 3, 4, 1), e(1, 2, 3)}, // /Table/1/2/3/4/1 -> /Table/1/2/3
 	}
 	for i, d := range goodData {
-		out, err := MakeSplitKey(d.in)
+		out, err := EnsureSafeSplitKey(d.in)
 		if err != nil {
 			t.Fatalf("%d: %s: unexpected error: %v", i, d.in, err)
 		}
@@ -488,7 +488,7 @@ func TestMakeSplitKey(t *testing.T) {
 		{e(1, 2, 200)[:3], "insufficient bytes to decode uvarint value"},
 	}
 	for i, d := range errorData {
-		_, err := MakeSplitKey(d.in)
+		_, err := EnsureSafeSplitKey(d.in)
 		if !testutils.IsError(err, d.err) {
 			t.Fatalf("%d: %s: expected %s, but got %v", i, d.in, d.err, err)
 		}

@@ -12,7 +12,7 @@
 // implied. See the License for the specific language governing
 // permissions and limitations under the License.
 //
-// Author: Radu Berinde (radu.berindeg@gmail.com)
+// Author: Radu Berinde (radu@cockroachlabs.com)
 // Author: Andrei Matei (andreimatei1@gmail.com)
 //
 // This file provides generic interfaces that allow tests to set up test servers
@@ -30,6 +30,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/base"
+	"github.com/cockroachdb/cockroach/gossip"
 	"github.com/cockroachdb/cockroach/internal/client"
 	"github.com/cockroachdb/cockroach/rpc"
 	"github.com/cockroachdb/cockroach/security"
@@ -61,6 +62,9 @@ type TestServerInterface interface {
 	// LeaseManager() returns the *sql.LeaseManager as an interface{}.
 	LeaseManager() interface{}
 
+	// Gossip returns the gossip used by the TestServer.
+	Gossip() *gossip.Gossip
+
 	// Clock returns the clock used by the TestServer.
 	Clock() *hlc.Clock
 
@@ -89,13 +93,13 @@ type TestServerFactory interface {
 	New(params base.TestServerArgs) interface{}
 }
 
-var serviceImpl TestServerFactory
+var srvFactoryImpl TestServerFactory
 
 // InitTestServerFactory should be called once to provide the implementation
 // of the service. It will be called from a xx_test package that can import the
 // server package.
 func InitTestServerFactory(impl TestServerFactory) {
-	serviceImpl = impl
+	srvFactoryImpl = impl
 }
 
 // StartServer creates a test server and sets up a gosql DB connection.
@@ -128,11 +132,11 @@ func StartServer(t testing.TB, params base.TestServerArgs) (
 // Generally StartServer() should be used. However this function can be used
 // directly when opening a connection to the server is not desired.
 func StartServerRaw(args base.TestServerArgs) (TestServerInterface, error) {
-	if serviceImpl == nil {
+	if srvFactoryImpl == nil {
 		panic("TestServerFactory not initialized. One needs to be injected " +
 			"from the package's TestMain()")
 	}
-	server := serviceImpl.New(args).(TestServerInterface)
+	server := srvFactoryImpl.New(args).(TestServerInterface)
 	if err := server.Start(args); err != nil {
 		return nil, err
 	}

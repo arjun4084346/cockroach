@@ -26,12 +26,13 @@ import (
 
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
-	"google.golang.org/grpc"
 
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/log"
+	"github.com/cockroachdb/cockroach/util/metric"
 	"github.com/cockroachdb/cockroach/util/stop"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/cockroachdb/cockroach/util/timeutil"
 )
 
@@ -45,27 +46,30 @@ type serverInfo struct {
 type server struct {
 	stopper *stop.Stopper
 
-	mu       sync.Mutex                         // Protects the fields below
+	mu       syncutil.Mutex                     // Protects the fields below
 	is       *infoStore                         // The backing infostore
 	incoming nodeSet                            // Incoming client node IDs
 	nodeMap  map[util.UnresolvedAddr]serverInfo // Incoming client's local address -> serverInfo
 	tighten  chan roachpb.NodeID                // Channel of too-distant node IDs
-	sent     int                                // Count of infos sent from this server to clients
-	received int                                // Count of infos received from clients
 	ready    chan struct{}                      // Broadcasts wakeup to waiting gossip requests
+
+	nodeMetrics   metrics
+	serverMetrics metrics
 
 	simulationCycler *sync.Cond // Used when simulating the network to signal next cycle
 }
 
 // newServer creates and returns a server struct.
-func newServer(stopper *stop.Stopper) *server {
+func newServer(stopper *stop.Stopper, registry *metric.Registry) *server {
 	return &server{
-		stopper:  stopper,
-		is:       newInfoStore(0, util.UnresolvedAddr{}, stopper),
-		incoming: makeNodeSet(minPeers),
-		nodeMap:  make(map[util.UnresolvedAddr]serverInfo),
-		tighten:  make(chan roachpb.NodeID, 1),
-		ready:    make(chan struct{}),
+		stopper:       stopper,
+		is:            newInfoStore(0, util.UnresolvedAddr{}, stopper),
+		incoming:      makeNodeSet(minPeers, registry.Gauge(ConnectionsIncomingGaugeName)),
+		nodeMap:       make(map[util.UnresolvedAddr]serverInfo),
+		tighten:       make(chan roachpb.NodeID, 1),
+		ready:         make(chan struct{}),
+		nodeMetrics:   makeMetrics(registry),
+		serverMetrics: makeMetrics(metric.NewRegistry()),
 	}
 }
 
@@ -87,6 +91,14 @@ func (s *server) Gossip(stream Gossip_GossipServer) error {
 			return ctx.Err()
 		case syncChan <- struct{}{}:
 			defer func() { <-syncChan }()
+
+			bytesSent := int64(reply.Size())
+			infoCount := int64(len(reply.Delta))
+			s.nodeMetrics.bytesSent.Add(bytesSent)
+			s.nodeMetrics.infosSent.Add(infoCount)
+			s.serverMetrics.bytesSent.Add(bytesSent)
+			s.serverMetrics.infosSent.Add(infoCount)
+
 			return stream.Send(reply)
 		}
 	}
@@ -123,7 +135,7 @@ func (s *server) Gossip(stream Gossip_GossipServer) error {
 
 		if infoCount := len(delta); infoCount > 0 {
 			if log.V(1) {
-				log.Infof("node %d returned %d info(s) to node %d", s.is.NodeID, infoCount, args.NodeID)
+				log.Infof(context.TODO(), "node %d returned %d info(s) to node %d", s.is.NodeID, infoCount, args.NodeID)
 			}
 
 			*reply = Response{
@@ -137,7 +149,6 @@ func (s *server) Gossip(stream Gossip_GossipServer) error {
 				return err
 			}
 			s.mu.Lock()
-			s.sent += infoCount
 		}
 
 		ready := s.ready
@@ -196,7 +207,7 @@ func (s *server) gossipReceiver(argsPtr **Request, senderFn func(*Response) erro
 					altIdx--
 				}
 
-				log.Infof("refusing gossip from node %d (max %d conns); forwarding to %d (%s)",
+				log.Infof(context.TODO(), "refusing gossip from node %d (max %d conns); forwarding to %d (%s)",
 					args.NodeID, s.incoming.maxSize, alternateNodeID, alternateAddr)
 
 				*reply = Response{
@@ -208,17 +219,31 @@ func (s *server) gossipReceiver(argsPtr **Request, senderFn func(*Response) erro
 				s.mu.Unlock()
 				err := senderFn(reply)
 				s.mu.Lock()
-				return err
+				// Naively, we would return err here unconditionally, but that
+				// introduces a race. Specifically, the client may observe the
+				// end of the connection before it has a chance to receive and
+				// process this message, which instructs it to hang up anyway.
+				// Instead, we send the message and proceed to gossip
+				// normally, depending on the client to end the connection.
+				if err != nil {
+					return err
+				}
 			}
 		}
 
-		s.received += len(args.Delta)
+		bytesReceived := int64(args.Size())
+		infosReceived := int64(len(args.Delta))
+		s.nodeMetrics.bytesReceived.Add(bytesReceived)
+		s.nodeMetrics.infosReceived.Add(infosReceived)
+		s.serverMetrics.bytesReceived.Add(bytesReceived)
+		s.serverMetrics.infosReceived.Add(infosReceived)
+
 		freshCount, err := s.is.combine(args.Delta, args.NodeID)
 		if err != nil {
-			log.Warningf("node %d failed to fully combine gossip delta from node %d: %s", s.is.NodeID, args.NodeID, err)
+			log.Warningf(context.TODO(), "node %d failed to fully combine gossip delta from node %d: %s", s.is.NodeID, args.NodeID, err)
 		}
 		if log.V(1) {
-			log.Infof("node %d received %s from node %d (%d fresh)", s.is.NodeID, extractKeys(args.Delta), args.NodeID, freshCount)
+			log.Infof(context.TODO(), "node %d received %s from node %d (%d fresh)", s.is.NodeID, extractKeys(args.Delta), args.NodeID, freshCount)
 		}
 		s.maybeTighten()
 
@@ -253,33 +278,19 @@ func (s *server) gossipReceiver(argsPtr **Request, senderFn func(*Response) erro
 	}
 }
 
-// InfosSent returns the total count of infos sent to clients.
-func (s *server) InfosSent() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sent
-}
-
-// InfosReceived returns the total count of infos received from clients.
-func (s *server) InfosReceived() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.received
-}
-
 // maybeTighten examines the infostore for the most distant node and
 // if more distant than MaxHops, sends on the tightenNetwork channel
 // to start a new client connection.
 func (s *server) maybeTighten() {
 	distantNodeID, distantHops := s.is.mostDistant()
 	if log.V(2) {
-		log.Infof("@%d: distantHops: %d from %d", s.is.NodeID, distantHops, distantNodeID)
+		log.Infof(context.TODO(), "@%d: distantHops: %d from %d", s.is.NodeID, distantHops, distantNodeID)
 	}
 	if distantHops > MaxHops {
 		select {
 		case s.tighten <- distantNodeID:
 			if log.V(1) {
-				log.Infof("if possible, tightening network to node %d (%d > %d)", distantNodeID, distantHops, MaxHops)
+				log.Infof(context.TODO(), "if possible, tightening network to node %d (%d > %d)", distantNodeID, distantHops, MaxHops)
 			}
 		default:
 			// Do nothing.
@@ -291,11 +302,10 @@ func (s *server) maybeTighten() {
 // then begins processing connecting clients in an infinite select
 // loop via goroutine. Periodically, clients connected and awaiting
 // the next round of gossip are awoken via the conditional variable.
-func (s *server) start(grpcServer *grpc.Server, addr net.Addr) {
+func (s *server) start(addr net.Addr) {
 	s.mu.Lock()
 	s.is.NodeAddr = util.MakeUnresolvedAddr(addr.Network(), addr.String())
 	s.mu.Unlock()
-	RegisterGossipServer(grpcServer, s)
 
 	broadcast := func() {
 		ready := make(chan struct{})
@@ -324,9 +334,8 @@ func (s *server) status() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var buf bytes.Buffer
-	n := len(s.nodeMap)
-	fmt.Fprintf(&buf, "gossip server (%d/%d cur/max conns, %d/%d sent/received)\n",
-		n, s.incoming.maxSize, s.sent, s.received)
+	fmt.Fprintf(&buf, "gossip server (%d/%d cur/max conns, %s)\n",
+		s.incoming.gauge.Value(), s.incoming.maxSize, s.serverMetrics)
 	for addr, info := range s.nodeMap {
 		// TODO(peter): Report per connection sent/received statistics. The
 		// structure of server.Gossip and server.gossipReceiver makes this

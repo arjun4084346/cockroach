@@ -175,7 +175,7 @@ class RangesMain extends React.Component<RangesMainProps, RangesMainState> {
               <div>Replica On: {replicaNodeIDs.join(", ")}</div>
               <div>Next Replica ID: {nodeRange.state.state.desc.next_replica_id}</div>
             </div> : ""}
-            {(this.state.showPending) ? <div>Pending Command Count: {nodeRange.state.num_pending || 0}</div> : ""}
+            {(this.state.showPending) ? <div>Pending Command Count: {(nodeRange.state.num_pending || 0).toString()}</div> : ""}
           </td>;
           row[index] = cell;
         });
@@ -224,7 +224,7 @@ let rangeStatuses = (state: AdminUIState): cockroach.server.serverpb.RaftDebugRe
 
 // Connect the RangesMain class with our redux store.
 let rangesMainConnected = connect(
-  (state, ownProps) => {
+  (state: AdminUIState) => {
     return {
       rangeStatuses: rangeStatuses(state),
     };

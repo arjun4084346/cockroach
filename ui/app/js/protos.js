@@ -139,6 +139,31 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                     ]
                 },
                 {
+                    "name": "ReplicaIdent",
+                    "fields": [
+                        {
+                            "rule": "optional",
+                            "type": "int64",
+                            "name": "range_id",
+                            "id": 1,
+                            "options": {
+                                "(gogoproto.nullable)": false,
+                                "(gogoproto.customname)": "RangeID",
+                                "(gogoproto.casttype)": "RangeID"
+                            }
+                        },
+                        {
+                            "rule": "optional",
+                            "type": "ReplicaDescriptor",
+                            "name": "replica",
+                            "id": 2,
+                            "options": {
+                                "(gogoproto.nullable)": false
+                            }
+                        }
+                    ]
+                },
+                {
                     "name": "RangeDescriptor",
                     "fields": [
                         {
@@ -302,6 +327,31 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                     ]
                 },
                 {
+                    "name": "StoreDeadReplicas",
+                    "fields": [
+                        {
+                            "rule": "optional",
+                            "type": "int32",
+                            "name": "store_id",
+                            "id": 1,
+                            "options": {
+                                "(gogoproto.nullable)": false,
+                                "(gogoproto.customname)": "StoreID",
+                                "(gogoproto.casttype)": "StoreID"
+                            }
+                        },
+                        {
+                            "rule": "repeated",
+                            "type": "ReplicaIdent",
+                            "name": "replicas",
+                            "id": 2,
+                            "options": {
+                                "(gogoproto.nullable)": false
+                            }
+                        }
+                    ]
+                },
+                {
                     "name": "Span",
                     "options": {
                         "(gogoproto.populate)": true
@@ -414,7 +464,7 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                         {
                             "rule": "optional",
                             "type": "RangeDescriptor",
-                            "name": "updated_desc",
+                            "name": "left_desc",
                             "id": 1,
                             "options": {
                                 "(gogoproto.nullable)": false
@@ -423,21 +473,10 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                         {
                             "rule": "optional",
                             "type": "RangeDescriptor",
-                            "name": "new_desc",
+                            "name": "right_desc",
                             "id": 2,
                             "options": {
                                 "(gogoproto.nullable)": false
-                            }
-                        },
-                        {
-                            "rule": "optional",
-                            "type": "int32",
-                            "name": "initial_leader_store_id",
-                            "id": 3,
-                            "options": {
-                                "(gogoproto.nullable)": false,
-                                "(gogoproto.customname)": "InitialLeaderStoreID",
-                                "(gogoproto.casttype)": "StoreID"
                             }
                         }
                     ]
@@ -448,7 +487,7 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                         {
                             "rule": "optional",
                             "type": "RangeDescriptor",
-                            "name": "updated_desc",
+                            "name": "left_desc",
                             "id": 1,
                             "options": {
                                 "(gogoproto.nullable)": false
@@ -457,7 +496,7 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                         {
                             "rule": "optional",
                             "type": "RangeDescriptor",
-                            "name": "subsumed_desc",
+                            "name": "right_desc",
                             "id": 2,
                             "options": {
                                 "(gogoproto.nullable)": false
@@ -1724,6 +1763,86 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                             ]
                         },
                         {
+                            "name": "TableStatsRequest",
+                            "fields": [
+                                {
+                                    "rule": "optional",
+                                    "type": "string",
+                                    "name": "database",
+                                    "id": 1
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "string",
+                                    "name": "table",
+                                    "id": 2
+                                }
+                            ]
+                        },
+                        {
+                            "name": "TableStatsResponse",
+                            "fields": [
+                                {
+                                    "rule": "optional",
+                                    "type": "int64",
+                                    "name": "range_count",
+                                    "id": 1
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "int64",
+                                    "name": "replica_count",
+                                    "id": 2
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "int64",
+                                    "name": "node_count",
+                                    "id": 3
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "storage.engine.enginepb.MVCCStats",
+                                    "name": "stats",
+                                    "id": 4,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
+                                },
+                                {
+                                    "rule": "repeated",
+                                    "type": "MissingNode",
+                                    "name": "missing_nodes",
+                                    "id": 5,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
+                                }
+                            ],
+                            "messages": [
+                                {
+                                    "name": "MissingNode",
+                                    "fields": [
+                                        {
+                                            "rule": "optional",
+                                            "type": "string",
+                                            "name": "node_id",
+                                            "id": 1,
+                                            "options": {
+                                                "(gogoproto.customname)": "NodeID"
+                                            }
+                                        },
+                                        {
+                                            "rule": "optional",
+                                            "type": "string",
+                                            "name": "error_message",
+                                            "id": 2
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
                             "name": "UsersRequest",
                             "fields": []
                         },
@@ -2357,6 +2476,58 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                             ]
                         },
                         {
+                            "name": "SpanStatsRequest",
+                            "fields": [
+                                {
+                                    "rule": "optional",
+                                    "type": "string",
+                                    "name": "node_id",
+                                    "id": 1,
+                                    "options": {
+                                        "(gogoproto.customname)": "NodeID"
+                                    }
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "bytes",
+                                    "name": "start_key",
+                                    "id": 2,
+                                    "options": {
+                                        "(gogoproto.casttype)": "github.com/cockroachdb/cockroach/roachpb.RKey"
+                                    }
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "bytes",
+                                    "name": "end_key",
+                                    "id": 3,
+                                    "options": {
+                                        "(gogoproto.casttype)": "github.com/cockroachdb/cockroach/roachpb.RKey"
+                                    }
+                                }
+                            ]
+                        },
+                        {
+                            "name": "SpanStatsResponse",
+                            "fields": [
+                                {
+                                    "rule": "optional",
+                                    "type": "int32",
+                                    "name": "range_count",
+                                    "id": 2
+                                },
+                                {
+                                    "rule": "optional",
+                                    "type": "storage.engine.enginepb.MVCCStats",
+                                    "name": "total_stats",
+                                    "id": 1,
+                                    "options": {
+                                        "(gogoproto.nullable)": false
+                                    }
+                                }
+                            ]
+                        },
+                        {
                             "name": "PrettySpan",
                             "fields": [
                                 {
@@ -2441,6 +2612,13 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                     "response": "TableDetailsResponse",
                                     "options": {
                                         "(google.api.http).get": "/_admin/v1/databases/{database}/tables/{table}"
+                                    }
+                                },
+                                "TableStats": {
+                                    "request": "TableStatsRequest",
+                                    "response": "TableStatsResponse",
+                                    "options": {
+                                        "(google.api.http).get": "/_admin/v1/databases/{database}/tables/{table}/stats"
                                     }
                                 },
                                 "Events": {
@@ -2542,6 +2720,14 @@ module.exports = require("protobufjs").newBuilder({})['import']({
                                     "response": "gossip.InfoStatus",
                                     "options": {
                                         "(google.api.http).get": "/_status/gossip/{node_id}"
+                                    }
+                                },
+                                "SpanStats": {
+                                    "request": "SpanStatsRequest",
+                                    "response": "SpanStatsResponse",
+                                    "options": {
+                                        "(google.api.http).post": "/_status/span",
+                                        "(google.api.http).body": "*"
                                     }
                                 },
                                 "Stacks": {

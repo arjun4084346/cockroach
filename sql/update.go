@@ -213,7 +213,7 @@ func (p *planner) Update(n *parser.Update, desiredTypes []parser.Datum, autoComm
 
 	rows, err := p.SelectClause(&parser.SelectClause{
 		Exprs: targets,
-		From:  []parser.TableExpr{n.Table},
+		From:  &parser.From{Tables: []parser.TableExpr{n.Table}},
 		Where: n.Where,
 	}, nil, nil, desiredTypesFromSelect, publicAndNonPublicColumns)
 	if err != nil {
@@ -284,7 +284,7 @@ func (u *updateNode) Next() (bool, error) {
 	if !next {
 		if err == nil {
 			// We're done. Finish the batch.
-			err = u.tw.finalize()
+			err = u.tw.finalize(u.p.ctx())
 		}
 		return false, err
 	}
@@ -323,7 +323,7 @@ func (u *updateNode) Next() (bool, error) {
 		}
 	}
 
-	newValues, err := u.tw.row(append(oldValues, updateValues...))
+	newValues, err := u.tw.row(u.p.ctx(), append(oldValues, updateValues...))
 	if err != nil {
 		return false, err
 	}

@@ -197,6 +197,27 @@ func (p *planner) getDataSource(
 ) (planDataSource, error) {
 	switch t := src.(type) {
 	case *parser.QualifiedName:
+		if err := t.NormalizeTableName(p.session.Database); err != nil {
+			return planDataSource{}, err
+		}
+
+		// Check for a virtual table.
+		virtual, err := getVirtualTableEntry(t)
+		if err != nil {
+			return planDataSource{}, err
+		}
+		if virtual.desc != nil {
+			v, err := virtual.getValuesNode(p)
+			if err != nil {
+				return planDataSource{}, err
+			}
+
+			return planDataSource{
+				info: newSourceInfoForSingleTable(virtual.desc.Name, v.Columns()),
+				plan: v,
+			}, nil
+		}
+
 		// Usual case: a table.
 		scan := p.Scan()
 		tableName, err := scan.initTable(p, t, hints, scanVisibility)
@@ -236,11 +257,6 @@ func (p *planner) getDataSource(
 		return p.getDataSource(t.Expr, hints, scanVisibility)
 
 	case *parser.AliasedTableExpr:
-		// AS OF expressions should be handled by the executor.
-		if t.AsOf.Expr != nil && !p.asOf {
-			return planDataSource{}, fmt.Errorf("unexpected AS OF SYSTEM TIME")
-		}
-
 		// Alias clause: source AS alias(cols...)
 		src, err := p.getDataSource(t.Expr, t.Hints, scanVisibility)
 		if err != nil {
@@ -271,7 +287,7 @@ func (p *planner) getDataSource(
 				if src.info.sourceColumns[colIdx].hidden {
 					continue
 				}
-				src.info.sourceColumns[colIdx].Name = string(colAlias[aliasIdx])
+				src.info.sourceColumns[colIdx].Name = colAlias[aliasIdx]
 				aliasIdx++
 			}
 		}

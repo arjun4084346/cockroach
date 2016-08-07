@@ -109,8 +109,11 @@ func (*legacyTransportAdapter) Close() {
 }
 
 func makeTestGossip(t *testing.T) (*gossip.Gossip, func()) {
-	n := simulation.NewNetwork(1)
+	n := simulation.NewNetwork(1, true)
+	n.Start()
 	g := n.Nodes[0].Gossip
+	// TODO(spencer): remove the use of gossip/simulation here.
+	g.EnableSimulationCycler(false)
 
 	if err := g.AddInfo(gossip.KeySentinel, nil, time.Hour); err != nil {
 		t.Fatal(err)
@@ -514,7 +517,7 @@ func TestRetryOnNotLeaseHolderError(t *testing.T) {
 		if first {
 			reply := &roachpb.BatchResponse{}
 			reply.Error = roachpb.NewError(
-				&roachpb.NotLeaseHolderError{LeaseHolder: &leaseHolder, Replica: &roachpb.ReplicaDescriptor{}})
+				&roachpb.NotLeaseHolderError{LeaseHolder: &leaseHolder})
 			first = false
 			return reply, nil
 		}
@@ -715,7 +718,7 @@ func TestRetryOnWrongReplicaError(t *testing.T) {
 		TransportFactory: adaptLegacyTransport(testFn),
 	}
 	ds := NewDistSender(ctx, g)
-	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"), 0)
+	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"))
 	if _, err := client.SendWrapped(ds, nil, scan); err != nil {
 		t.Errorf("scan encountered error: %s", err)
 	}
@@ -784,7 +787,7 @@ func TestRetryOnWrongReplicaErrorWithSuggestion(t *testing.T) {
 		TransportFactory: adaptLegacyTransport(testFn),
 	}
 	ds := NewDistSender(ctx, g)
-	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"), 0)
+	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"))
 	if _, err := client.SendWrapped(ds, nil, scan); err != nil {
 		t.Errorf("scan encountered error: %s", err)
 	}
@@ -792,7 +795,12 @@ func TestRetryOnWrongReplicaErrorWithSuggestion(t *testing.T) {
 
 func TestGetFirstRangeDescriptor(t *testing.T) {
 	defer leaktest.AfterTest(t)()
-	n := simulation.NewNetwork(3)
+	n := simulation.NewNetwork(3, true)
+	for _, node := range n.Nodes {
+		// TODO(spencer): remove the use of gossip/simulation here.
+		node.Gossip.EnableSimulationCycler(false)
+	}
+	n.Start()
 	ds := NewDistSender(nil, n.Nodes[0].Gossip)
 	if _, err := ds.FirstRange(); err == nil {
 		t.Errorf("expected not to find first range descriptor")
@@ -875,8 +883,8 @@ func TestSendRPCRetry(t *testing.T) {
 		}),
 	}
 	ds := NewDistSender(ctx, g)
-	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"), 1)
-	sr, err := client.SendWrapped(ds, nil, scan)
+	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"))
+	sr, err := client.SendWrappedWith(ds, nil, roachpb.Header{MaxSpanRequestKeys: 1}, scan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -983,10 +991,11 @@ func TestMultiRangeMergeStaleDescriptor(t *testing.T) {
 		}),
 	}
 	ds := NewDistSender(ctx, g)
-	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"), 10)
+	scan := roachpb.NewScan(roachpb.Key("a"), roachpb.Key("d"))
 	// Set the Txn info to avoid an OpRequiresTxnError.
 	reply, err := client.SendWrappedWith(ds, nil, roachpb.Header{
-		Txn: &roachpb.Transaction{},
+		MaxSpanRequestKeys: 10,
+		Txn:                &roachpb.Transaction{},
 	}, scan)
 	if err != nil {
 		t.Fatalf("scan encountered error: %s", err)
@@ -1301,7 +1310,7 @@ func TestTruncateWithLocalSpanAndDescriptor(t *testing.T) {
 	// only the scan on local keys that address from "b" to "d".
 	ba := roachpb.BatchRequest{}
 	ba.Txn = &roachpb.Transaction{Name: "test"}
-	ba.Add(roachpb.NewScan(keys.RangeDescriptorKey(roachpb.RKey("a")), keys.RangeDescriptorKey(roachpb.RKey("c")), 0))
+	ba.Add(roachpb.NewScan(keys.RangeDescriptorKey(roachpb.RKey("a")), keys.RangeDescriptorKey(roachpb.RKey("c"))))
 
 	if _, pErr := ds.Send(context.Background(), ba); pErr != nil {
 		t.Fatal(pErr)

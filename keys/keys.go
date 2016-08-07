@@ -253,6 +253,12 @@ func RangeLastVerificationTimestampKey(rangeID roachpb.RangeID) roachpb.Key {
 	return MakeRangeIDUnreplicatedKey(rangeID, LocalRangeLastVerificationTimestampSuffix, nil)
 }
 
+// RangeReplicaDestroyedErrorKey returns a range-local key for
+// the range's replica destroyed error.
+func RangeReplicaDestroyedErrorKey(rangeID roachpb.RangeID) roachpb.Key {
+	return MakeRangeIDUnreplicatedKey(rangeID, LocalRangeReplicaDestroyedErrorSuffix, nil)
+}
+
 // MakeRangeKey creates a range-local key based on the range
 // start key, metadata key suffix, and optional detail (e.g. the
 // transaction ID for a txn record, etc.).
@@ -358,10 +364,11 @@ func Addr(k roachpb.Key) (roachpb.RKey, error) {
 	return roachpb.RKey(k), nil
 }
 
-func mustAddr(k roachpb.Key) roachpb.RKey {
+// MustAddr calls Addr and panics on errors.
+func MustAddr(k roachpb.Key) roachpb.RKey {
 	rk, err := Addr(k)
 	if err != nil {
-		panic(err)
+		panic(errors.Wrapf(err, "could not take address of '%s'", k))
 	}
 	return rk
 }
@@ -525,9 +532,9 @@ func MakeRowSentinelKey(key []byte) []byte {
 	return MakeFamilyKey(key, SentinelFamilyID)
 }
 
-// MakeSplitKey transforms an SQL table key such that it is a valid split key
+// EnsureSafeSplitKey transforms an SQL table key such that it is a valid split key
 // (i.e. does not occur in the middle of a row).
-func MakeSplitKey(key roachpb.Key) (roachpb.Key, error) {
+func EnsureSafeSplitKey(key roachpb.Key) (roachpb.Key, error) {
 	if encoding.PeekType(key) != encoding.Int {
 		// Not a table key, so already a split key.
 		return key, nil
@@ -551,13 +558,14 @@ func MakeSplitKey(key roachpb.Key) (roachpb.Key, error) {
 		return nil, err
 	}
 	if int(colIDLen)+1 > n {
-		// The column ID length was impossible. colIDLen is the length of the
-		// encoded column ID suffix. We add 1 to account for the byte holding the
-		// length of the encoded column ID and if that total (colIDLen+1) is
-		// greater than the key suffix (n == len(buf)) then we bail. Note that we
-		// don't consider this an error because MakeSplitKey can be called on keys
-		// that look like table keys but which do not have a column ID length
-		// suffix (e.g SystemConfig.ComputeSplitKeys).
+		// The column ID length was impossible. colIDLen is the length of
+		// the encoded column ID suffix. We add 1 to account for the byte
+		// holding the length of the encoded column ID and if that total
+		// (colIDLen+1) is greater than the key suffix (n == len(buf))
+		// then we bail. Note that we don't consider this an error because
+		// EnsureSafeSplitKey can be called on keys that look like table
+		// keys but which do not have a column ID length suffix (e.g
+		// SystemConfig.ComputeSplitKeys).
 		return nil, errors.Errorf("%s: malformed table key", key)
 	}
 	return key[:len(key)-int(colIDLen)-1], nil

@@ -8,7 +8,7 @@ import { databaseName } from "../../util/constants";
 
 import { AdminUIState } from "../../redux/state";
 import { setUISetting } from "../../redux/ui";
-import { refreshDatabaseDetails } from "../../redux/databaseInfo";
+import { refreshDatabaseDetails } from "../../redux/apiReducers";
 
 import { SortableTable, SortableColumn, SortSetting } from "../../components/sortabletable";
 
@@ -45,6 +45,8 @@ interface TablesColumnDescriptor {
   // tables. This will be used to sort the table according to the data in
   // this column.
   sort?: (s: string) => any;
+  // className to be applied to the td elements
+  className?: string;
 }
 
 /**
@@ -61,6 +63,7 @@ let tablesColumnDescriptors: TablesColumnDescriptor[] = [
       return <Link to={`databases/${id}/${s}`}>{s}</Link>;
     } ,
     sort: _.identity,
+    className: "expand-link",
   },
 ];
 
@@ -173,6 +176,7 @@ class DatabaseMain extends React.Component<DatabaseMainProps, {}> {
           title: cd.title,
           cell: (index) => cd.cell(tables[index], this.props.params[databaseName]),
           sortKey: cd.sort ? cd.key : undefined,
+          className: cd.className,
         };
       });
     });
@@ -209,7 +213,7 @@ class DatabaseMain extends React.Component<DatabaseMainProps, {}> {
 
   // refresh when the component is mounted
   componentWillMount() {
-    this.props.refreshDatabaseDetails(this.props.params[databaseName]);
+    this.props.refreshDatabaseDetails({ database: this.props.params[databaseName] });
   }
 
   render() {
@@ -241,7 +245,7 @@ class DatabaseMain extends React.Component<DatabaseMainProps, {}> {
 
 // Helper function that gets a DatabaseDetailsResponseMessage given a state and props
 function getDatabaseDetails(state: AdminUIState, props: IInjectedProps): DatabaseDetailsResponseMessage {
-  let details = state.databaseInfo.databaseDetails[props.params[databaseName]];
+  let details = state.cachedData.databaseDetails[props.params[databaseName]];
   return details && details.data;
 }
 
@@ -283,7 +287,7 @@ let sortedGrants = createSelector(
 
 // Connect the DatabaseMain class with our redux store.
 let databaseMainConnected = connect(
-  (state, ownProps) => {
+  (state: AdminUIState, ownProps: IInjectedProps) => {
     return {
       sortedTables: sortedTables(state, ownProps),
       sortedGrants: sortedGrants(state, ownProps),

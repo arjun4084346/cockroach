@@ -76,6 +76,8 @@ func TestNormalizeTableName(t *testing.T) {
 		{`test.foo.bar`, ``, ``, `invalid table name: test.foo.bar`},
 		{`test.foo[bar]`, ``, ``, `invalid table name: test.foo\[bar\]`},
 		{`test.foo.bar[blah]`, ``, ``, `invalid table name: test.foo.bar\[blah\]`},
+		{`test.*`, ``, ``, `invalid table name: test.*`},
+		{`test[blah]`, ``, ``, `invalid table name: test\[blah\]`},
 	}
 
 	for _, tc := range testCases {
@@ -83,7 +85,7 @@ func TestNormalizeTableName(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", tc.in, err)
 		}
-		ate := stmt.(*Select).Select.(*SelectClause).From[0].(*AliasedTableExpr)
+		ate := stmt.(*Select).Select.(*SelectClause).From.Tables[0].(*AliasedTableExpr)
 		err = ate.Expr.(*QualifiedName).NormalizeTableName(tc.db)
 		if tc.err != "" {
 			if !testutils.IsError(err, tc.err) {

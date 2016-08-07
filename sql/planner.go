@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/config"
 	"github.com/cockroachdb/cockroach/internal/client"
 	"github.com/cockroachdb/cockroach/sql/parser"
@@ -71,7 +73,7 @@ type planner struct {
 func makePlanner() *planner {
 	// init with an empty session. We can't leave this nil because too much code
 	// looks in the session for the current database.
-	return &planner{session: &Session{Location: time.UTC}}
+	return &planner{session: &Session{Location: time.UTC, context: context.Background()}}
 }
 
 // queryRunner abstracts the services provided by a planner object
@@ -142,6 +144,11 @@ type queryRunner interface {
 }
 
 var _ queryRunner = &planner{}
+
+// ctx returns the current session context (suitable for logging/tracing).
+func (p *planner) ctx() context.Context {
+	return p.session.Ctx()
+}
 
 // setTxn implements the queryRunner interface.
 func (p *planner) setTxn(txn *client.Txn) {
@@ -218,10 +225,7 @@ func (p *planner) queryRow(sql string, args ...interface{}) (parser.DTuple, erro
 		return nil, err
 	}
 	if next, err := plan.Next(); !next {
-		if err != nil {
-			return nil, err
-		}
-		return nil, nil
+		return nil, err
 	}
 	values := plan.Values()
 	next, err := plan.Next()
@@ -287,7 +291,7 @@ func (p *planner) checkTestingVerifyMetadataOrDie(
 		return
 	}
 	if !p.verifyFnCheckedOnce {
-		panic("intial state of the condition to verify was not checked")
+		panic("initial state of the condition to verify was not checked")
 	}
 
 	for p.testingVerifyMetadataFn(e.systemConfig) != nil {

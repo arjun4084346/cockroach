@@ -41,9 +41,14 @@ type DescriptorAccessor interface {
 	// checkPrivilege verifies that p.session.User has `privilege` on `descriptor`.
 	checkPrivilege(descriptor sqlbase.DescriptorProto, privilege privilege.Kind) error
 
+	// anyPrivilege verifies that p.session.User has any privilege on `descriptor`.
+	anyPrivilege(descriptor sqlbase.DescriptorProto) error
+
 	// createDescriptor takes a Table or Database descriptor and creates it if
 	// needed, incrementing the descriptor counter. Returns true if the descriptor
-	// is actually created, false if it already existed.
+	// is actually created, false if it already existed, or an error if one was encountered.
+	// The ifNotExists flag is used to declare if the "already existed" state should be an
+	// error (false) or a no-op (true).
 	createDescriptor(plainKey sqlbase.DescriptorKey, descriptor sqlbase.DescriptorProto, ifNotExists bool) (bool, error)
 
 	// getDescriptor looks up the descriptor for `plainKey`, validates it,
@@ -52,6 +57,9 @@ type DescriptorAccessor interface {
 	// In most cases you'll want to use wrappers: `getDatabaseDesc` or
 	// `getTableDesc`.
 	getDescriptor(plainKey sqlbase.DescriptorKey, descriptor sqlbase.DescriptorProto) (bool, error)
+
+	// getAllDescriptors looks up and returns all available descriptors.
+	getAllDescriptors() ([]sqlbase.DescriptorProto, error)
 
 	// getDescriptorsFromTargetList examines a TargetList and fetches the
 	// appropriate descriptors.
@@ -69,6 +77,24 @@ func (p *planner) checkPrivilege(descriptor sqlbase.DescriptorProto, privilege p
 		p.session.User, privilege, descriptor.TypeName(), descriptor.GetName())
 }
 
+// anyPrivilege implements the DescriptorAccessor interface.
+func (p *planner) anyPrivilege(descriptor sqlbase.DescriptorProto) error {
+	if descriptor.GetPrivileges().AnyPrivilege(p.session.User) || isVirtualDescriptor(descriptor) {
+		return nil
+	}
+	return fmt.Errorf("user %s has no privileges on %s %s",
+		p.session.User, descriptor.TypeName(), descriptor.GetName())
+}
+
+type descriptorAlreadyExistsErr struct {
+	desc sqlbase.DescriptorProto
+	name string
+}
+
+func (d descriptorAlreadyExistsErr) Error() string {
+	return fmt.Sprintf("%s %q already exists", d.desc.TypeName(), d.name)
+}
+
 // createDescriptor implements the DescriptorAccessor interface.
 func (p *planner) createDescriptor(plainKey sqlbase.DescriptorKey, descriptor sqlbase.DescriptorProto, ifNotExists bool) (bool, error) {
 	idKey := plainKey.Key()
@@ -84,7 +110,7 @@ func (p *planner) createDescriptor(plainKey sqlbase.DescriptorKey, descriptor sq
 			return false, nil
 		}
 		// Key exists, but we don't want it to: error out.
-		return false, fmt.Errorf("%s %q already exists", descriptor.TypeName(), plainKey.Name())
+		return false, descriptorAlreadyExistsErr{descriptor, plainKey.Name()}
 	}
 
 	// Increment unique descriptor counter.
@@ -109,8 +135,8 @@ func (p *planner) createDescriptor(plainKey sqlbase.DescriptorKey, descriptor sq
 	descID := descriptor.GetID()
 	descDesc := sqlbase.WrapDescriptor(descriptor)
 	if log.V(2) {
-		log.Infof("CPut %s -> %d", idKey, descID)
-		log.Infof("CPut %s -> %s", descKey, descDesc)
+		log.Infof(p.ctx(), "CPut %s -> %d", idKey, descID)
+		log.Infof(p.ctx(), "CPut %s -> %s", descKey, descDesc)
 	}
 	b.CPut(idKey, descID, nil)
 	b.CPut(descKey, descDesc, nil)
@@ -154,19 +180,47 @@ func (p *planner) getDescriptor(plainKey sqlbase.DescriptorKey, descriptor sqlba
 		if table == nil {
 			return false, errors.Errorf("%q is not a table", plainKey.Name())
 		}
+		if err := table.Validate(p.txn); err != nil {
+			return false, err
+		}
 		*t = *table
 	case *sqlbase.DatabaseDescriptor:
 		database := desc.GetDatabase()
 		if database == nil {
 			return false, errors.Errorf("%q is not a database", plainKey.Name())
 		}
+		if err := database.Validate(); err != nil {
+			return false, err
+		}
 		*t = *database
 	}
-
-	if err := descriptor.Validate(); err != nil {
-		return false, err
-	}
 	return true, nil
+}
+
+// getAllDescriptors implements the DescriptorAccessor interface.
+func (p *planner) getAllDescriptors() ([]sqlbase.DescriptorProto, error) {
+	descsKey := sqlbase.MakeAllDescsMetadataKey()
+	kvs, err := p.txn.Scan(descsKey, descsKey.PrefixEnd(), 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var descs []sqlbase.DescriptorProto
+	for _, kv := range kvs {
+		desc := &sqlbase.Descriptor{}
+		if err := kv.ValueProto(desc); err != nil {
+			return nil, err
+		}
+		switch t := desc.Union.(type) {
+		case *sqlbase.Descriptor_Table:
+			descs = append(descs, desc.GetTable())
+		case *sqlbase.Descriptor_Database:
+			descs = append(descs, desc.GetDatabase())
+		default:
+			return nil, errors.Errorf("Descriptor.Union has unexpected type %T", t)
+		}
+	}
+	return descs, nil
 }
 
 // getDescriptorsFromTargetList implements the DescriptorAccessor interface.
@@ -178,12 +232,9 @@ func (p *planner) getDescriptorsFromTargetList(targets parser.TargetList) (
 		}
 		descs := make([]sqlbase.DescriptorProto, 0, len(targets.Databases))
 		for _, database := range targets.Databases {
-			descriptor, err := p.getDatabaseDesc(database)
+			descriptor, err := p.mustGetDatabaseDesc(database)
 			if err != nil {
 				return nil, err
-			}
-			if descriptor == nil {
-				return nil, sqlbase.NewUndefinedDatabaseError(database)
 			}
 			descs = append(descs, descriptor)
 		}

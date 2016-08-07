@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/protoutil"
+	"github.com/pkg/errors"
 )
 
 // pendingLeaseRequest coalesces RequestLease requests and lets callers
@@ -129,8 +130,7 @@ func (p *pendingLeaseRequest) InitOrJoinRequest(
 		// checks from normal request machinery, (e.g. the command queue).
 		// Note that the command itself isn't traced, but usually the caller
 		// waiting for the result has an active Trace.
-		ch, _, err := replica.proposeRaftCommand(
-			replica.context(context.Background()), ba)
+		ch, _, err := replica.proposeRaftCommand(context.Background(), ba)
 		if err != nil {
 			execPErr = roachpb.NewError(err)
 		} else {
@@ -139,13 +139,13 @@ func (p *pendingLeaseRequest) InitOrJoinRequest(
 			case c := <-ch:
 				if c.Err != nil {
 					if log.V(1) {
-						log.Infof("failed to acquire lease for replica %s: %s", replica.store, c.Err)
+						log.Infof(context.TODO(), "failed to acquire lease for replica %s: %s", replica, c.Err)
 					}
 					execPErr = c.Err
 				}
 			case <-replica.store.Stopper().ShouldQuiesce():
 				execPErr = roachpb.NewError(
-					replica.newNotLeaseHolderError(nil, replica.store.StoreID(), replica.Desc()))
+					newNotLeaseHolderError(nil, replica.store.StoreID(), replica.Desc()))
 			}
 		}
 
@@ -170,7 +170,7 @@ func (p *pendingLeaseRequest) InitOrJoinRequest(
 		// back to indicate that we have no idea who the range lease holder might
 		// be; we've withdrawn from active duty.
 		llChan <- roachpb.NewError(
-			replica.newNotLeaseHolderError(nil, replica.store.StoreID(), replica.mu.state.Desc))
+			newNotLeaseHolderError(nil, replica.store.StoreID(), replica.mu.state.Desc))
 		return llChan
 	}
 	p.llChans = append(p.llChans, llChan)
@@ -232,13 +232,13 @@ func (r *Replica) requestLeaseLocked(timestamp hlc.Timestamp) <-chan *roachpb.Er
 	if transferLease != nil {
 		llChan := make(chan *roachpb.Error, 1)
 		llChan <- roachpb.NewError(
-			r.newNotLeaseHolderError(transferLease, r.store.StoreID(), r.mu.state.Desc))
+			newNotLeaseHolderError(transferLease, r.store.StoreID(), r.mu.state.Desc))
 		return llChan
 	}
 	if r.store.IsDrainingLeases() {
 		// We've retired from active duty.
 		llChan := make(chan *roachpb.Error, 1)
-		llChan <- roachpb.NewError(r.newNotLeaseHolderError(nil, r.store.StoreID(), r.mu.state.Desc))
+		llChan <- roachpb.NewError(newNotLeaseHolderError(nil, r.store.StoreID(), r.mu.state.Desc))
 		return llChan
 	}
 	return r.mu.pendingLeaseRequest.InitOrJoinRequest(
@@ -263,20 +263,33 @@ func (r *Replica) requestLeaseLocked(timestamp hlc.Timestamp) <-chan *roachpb.Er
 //
 // TODO(andrei): figure out how to persist the "not serving" state across node
 // restarts.
-func (r *Replica) AdminTransferLease(nextLeader roachpb.ReplicaDescriptor) error {
+func (r *Replica) AdminTransferLease(target roachpb.StoreID) error {
 	// initTransferHelper inits a transfer if no extension is in progress.
 	// It returns a channel for waiting for the result of a pending
 	// extension (if any is in progress) and a channel for waiting for the
 	// transfer (if it was successfully initiated).
+	var nextLeaseHolder roachpb.ReplicaDescriptor
 	initTransferHelper := func() (<-chan *roachpb.Error, <-chan *roachpb.Error, error) {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+
 		lease := r.mu.state.Lease
-		if !lease.OwnedBy(r.store.StoreID()) {
-			return nil, nil, r.newNotLeaseHolderError(lease, r.store.StoreID(), r.Desc())
+		if lease.OwnedBy(target) {
+			// The target is already the lease holder. Nothing to do.
+			return nil, nil, nil
 		}
+		desc := r.mu.state.Desc
+		if !lease.OwnedBy(r.store.StoreID()) {
+			return nil, nil, newNotLeaseHolderError(lease, r.store.StoreID(), desc)
+		}
+		// Verify the target is a replica of the range.
+		var ok bool
+		if nextLeaseHolder, ok = desc.GetReplicaDescriptor(target); !ok {
+			return nil, nil, errors.Errorf("unable to find store %d in range %+v", target, desc)
+		}
+
 		nextLease := r.mu.pendingLeaseRequest.RequestPending()
-		if nextLease != nil && nextLease.Replica != nextLeader {
+		if nextLease != nil && nextLease.Replica != nextLeaseHolder {
 			repDesc, err := r.getReplicaDescriptorLocked()
 			if err != nil {
 				return nil, nil, err
@@ -288,7 +301,7 @@ func (r *Replica) AdminTransferLease(nextLeader roachpb.ReplicaDescriptor) error
 			}
 			// Another transfer is in progress, and it's not transferring to the
 			// same replica we'd like.
-			return nil, nil, r.newNotLeaseHolderError(nextLease, r.store.StoreID(), r.mu.state.Desc)
+			return nil, nil, newNotLeaseHolderError(nextLease, r.store.StoreID(), desc)
 		}
 		// No extension in progress; start a transfer.
 		nextLeaseBegin := r.store.Clock().Now()
@@ -297,8 +310,8 @@ func (r *Replica) AdminTransferLease(nextLeader roachpb.ReplicaDescriptor) error
 		nextLeaseBegin.Forward(
 			hlc.ZeroTimestamp.Add(r.store.startedAt+int64(r.store.Clock().MaxOffset()), 0))
 		transfer := r.mu.pendingLeaseRequest.InitOrJoinRequest(
-			r, nextLeader, nextLeaseBegin,
-			r.mu.state.Desc.StartKey.AsRawKey(), true /* transfer */)
+			r, nextLeaseHolder, nextLeaseBegin,
+			desc.StartKey.AsRawKey(), true /* transfer */)
 		return nil, transfer, nil
 	}
 
@@ -311,11 +324,15 @@ func (r *Replica) AdminTransferLease(nextLeader roachpb.ReplicaDescriptor) error
 			return err
 		}
 		if extension == nil {
+			if transfer == nil {
+				// The target is us and we're the lease holder.
+				return nil
+			}
 			return (<-transfer).GoError()
 		}
 		// Wait for the in-progress extension without holding the mutex.
 		if r.store.TestingKnobs().LeaseTransferBlockedOnExtensionEvent != nil {
-			r.store.TestingKnobs().LeaseTransferBlockedOnExtensionEvent(nextLeader)
+			r.store.TestingKnobs().LeaseTransferBlockedOnExtensionEvent(nextLeaseHolder)
 		}
 		<-extension
 	}

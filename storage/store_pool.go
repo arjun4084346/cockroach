@@ -19,7 +19,6 @@ package storage
 import (
 	"container/heap"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -32,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/stop"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/cockroachdb/cockroach/util/timeutil"
 )
 
@@ -67,6 +67,7 @@ type storeDetail struct {
 	throttledUntil  time.Time
 	lastUpdatedTime hlc.Timestamp // This is also the priority for the queue.
 	index           int           // index of the item in the heap, required for heap.Interface
+	deadReplicas    map[roachpb.RangeID][]roachpb.ReplicaDescriptor
 }
 
 // markDead sets the storeDetail to dead(inactive).
@@ -77,7 +78,7 @@ func (sd *storeDetail) markDead(foundDeadOn hlc.Timestamp) {
 	if sd.desc != nil {
 		// sd.desc can still be nil if it was markedAlive and enqueued in getStoreDetailLocked
 		// and never markedAlive again.
-		log.Warningf("store %s on node %s is now considered offline", sd.desc.StoreID, sd.desc.Node.NodeID)
+		log.Warningf(context.TODO(), "store %s on node %s is now considered offline", sd.desc.StoreID, sd.desc.Node.NodeID)
 	}
 }
 
@@ -195,8 +196,9 @@ type StorePool struct {
 	failedReservationsTimeout   time.Duration
 	declinedReservationsTimeout time.Duration
 	reserveRPCTimeout           time.Duration
+	resolver                    NodeAddressResolver
 	mu                          struct {
-		sync.RWMutex
+		syncutil.RWMutex
 		// Each storeDetail is contained in both a map and a priorityQueue;
 		// pointers are used so that data can be kept in sync.
 		stores map[roachpb.StoreID]*storeDetail
@@ -225,11 +227,14 @@ func NewStorePool(
 			defaultDeclinedReservationsTimeout),
 		reserveRPCTimeout: envutil.EnvOrDefaultDuration("reserve_rpc_timeout",
 			defaultReserveRPCTimeout),
+		resolver: GossipAddressResolver(g),
 	}
 	sp.mu.stores = make(map[roachpb.StoreID]*storeDetail)
 	heap.Init(&sp.mu.queue)
 	storeRegex := gossip.MakePrefixPattern(gossip.KeyStorePrefix)
 	g.RegisterCallback(storeRegex, sp.storeGossipUpdate)
+	deadReplicasRegex := gossip.MakePrefixPattern(gossip.KeyDeadReplicasPrefix)
+	g.RegisterCallback(deadReplicasRegex, sp.deadReplicasGossipUpdate)
 	sp.start(stopper)
 
 	return sp
@@ -239,21 +244,34 @@ func NewStorePool(
 func (sp *StorePool) storeGossipUpdate(_ string, content roachpb.Value) {
 	var storeDesc roachpb.StoreDescriptor
 	if err := content.GetProto(&storeDesc); err != nil {
-		log.Error(err)
+		log.Error(context.TODO(), err)
 		return
 	}
 
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 	// Does this storeDetail exist yet?
-	detail, ok := sp.mu.stores[storeDesc.StoreID]
-	if !ok {
-		// Setting index to -1 ensures this gets added to the queue.
-		detail = &storeDetail{index: -1}
-		sp.mu.stores[storeDesc.StoreID] = detail
-	}
+	detail := sp.getStoreDetailLocked(storeDesc.StoreID)
 	detail.markAlive(sp.clock.Now(), &storeDesc)
 	sp.mu.queue.enqueue(detail)
+}
+
+// deadReplicasGossipUpdate is the gossip callback used to keep the StorePool up to date.
+func (sp *StorePool) deadReplicasGossipUpdate(_ string, content roachpb.Value) {
+	var replicas roachpb.StoreDeadReplicas
+	if err := content.GetProto(&replicas); err != nil {
+		log.Error(context.TODO(), err)
+		return
+	}
+
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	detail := sp.getStoreDetailLocked(replicas.StoreID)
+	deadReplicas := make(map[roachpb.RangeID][]roachpb.ReplicaDescriptor)
+	for _, r := range replicas.Replicas {
+		deadReplicas[r.RangeID] = append(deadReplicas[r.RangeID], r.Replica)
+	}
+	detail.deadReplicas = deadReplicas
 }
 
 // start will run continuously and mark stores as offline if they haven't been
@@ -297,10 +315,19 @@ func (sp *StorePool) start(stopper *stop.Stopper) {
 	})
 }
 
+// newStoreDetail makes a new storeDetail struct. It sets index to be -1 to
+// ensure that it will be processed by a queue immediately.
+func newStoreDetail() *storeDetail {
+	return &storeDetail{
+		index:        -1,
+		deadReplicas: make(map[roachpb.RangeID][]roachpb.ReplicaDescriptor),
+	}
+}
+
 // getStoreDetailLocked returns the store detail for the given storeID.
 // The lock must be held *in write mode* even though this looks like a
 // read-only method.
-func (sp *StorePool) getStoreDetailLocked(storeID roachpb.StoreID) storeDetail {
+func (sp *StorePool) getStoreDetailLocked(storeID roachpb.StoreID) *storeDetail {
 	detail, ok := sp.mu.stores[storeID]
 	if !ok {
 		// We don't have this store yet (this is normal when we're
@@ -308,39 +335,48 @@ func (sp *StorePool) getStoreDetailLocked(storeID roachpb.StoreID) storeDetail {
 		// network). The first time this occurs, presume the store is
 		// alive, but start the clock so it will become dead if enough
 		// time passes without updates from gossip.
-		detail = &storeDetail{index: -1}
+		detail = newStoreDetail()
 		sp.mu.stores[storeID] = detail
 		detail.markAlive(sp.clock.Now(), nil)
 		sp.mu.queue.enqueue(detail)
 	}
 
-	return *detail
+	return detail
 }
 
 // getStoreDescriptor returns the latest store descriptor for the given
 // storeID.
-func (sp *StorePool) getStoreDescriptor(storeID roachpb.StoreID) *roachpb.StoreDescriptor {
+func (sp *StorePool) getStoreDescriptor(storeID roachpb.StoreID) (roachpb.StoreDescriptor, bool) {
 	sp.mu.RLock()
 	defer sp.mu.RUnlock()
 
-	detail, ok := sp.mu.stores[storeID]
-	if !ok {
-		return nil
+	if detail, ok := sp.mu.stores[storeID]; ok && detail.desc != nil {
+		return *detail.desc, true
 	}
-
-	return detail.desc
+	return roachpb.StoreDescriptor{}, false
 }
 
 // deadReplicas returns any replicas from the supplied slice that are
-// located on dead stores.
-func (sp *StorePool) deadReplicas(repls []roachpb.ReplicaDescriptor) []roachpb.ReplicaDescriptor {
+// located on dead stores or dead replicas for the provided rangeID.
+func (sp *StorePool) deadReplicas(rangeID roachpb.RangeID, repls []roachpb.ReplicaDescriptor) []roachpb.ReplicaDescriptor {
 	sp.mu.Lock()
 	defer sp.mu.Unlock()
 
 	var deadReplicas []roachpb.ReplicaDescriptor
+outer:
 	for _, repl := range repls {
-		if sp.getStoreDetailLocked(repl.StoreID).dead {
+		detail := sp.getStoreDetailLocked(repl.StoreID)
+		// Mark replica as dead if store is dead.
+		if detail.dead {
 			deadReplicas = append(deadReplicas, repl)
+			continue
+		}
+
+		for _, deadRepl := range detail.deadReplicas[rangeID] {
+			if deadRepl.ReplicaID == repl.ReplicaID {
+				deadReplicas = append(deadReplicas, repl)
+				continue outer
+			}
 		}
 	}
 	return deadReplicas
@@ -365,7 +401,7 @@ func (s *stat) update(x float64) {
 // StoreList holds a list of store descriptors and associated count and used
 // stats for those stores.
 type StoreList struct {
-	stores      []*roachpb.StoreDescriptor
+	stores      []roachpb.StoreDescriptor
 	count, used stat
 
 	// candidateCount tracks range count stats for stores that are eligible to
@@ -376,7 +412,7 @@ type StoreList struct {
 
 // add includes the store descriptor to the list of stores and updates
 // maintained statistics.
-func (sl *StoreList) add(s *roachpb.StoreDescriptor) {
+func (sl *StoreList) add(s roachpb.StoreDescriptor) {
 	sl.stores = append(sl.stores, s)
 	sl.count.update(float64(s.Capacity.RangeCount))
 	sl.used.update(s.Capacity.FractionUsed())
@@ -409,7 +445,7 @@ func (sp *StorePool) getStoreList(required roachpb.Attributes, deterministic boo
 	var aliveStoreCount int
 	var throttledStoreCount int
 	for _, storeID := range storeIDs {
-		detail := sp.mu.stores[roachpb.StoreID(storeID)]
+		detail := sp.mu.stores[storeID]
 		matched := detail.match(now, required)
 		switch matched {
 		case storeMatchAlive:
@@ -419,7 +455,7 @@ func (sp *StorePool) getStoreList(required roachpb.Attributes, deterministic boo
 			throttledStoreCount++
 		case storeMatchAvailable:
 			aliveStoreCount++
-			sl.add(detail.desc)
+			sl.add(*detail.desc)
 		}
 	}
 	return sl, aliveStoreCount, throttledStoreCount
@@ -447,12 +483,16 @@ func (sp *StorePool) reserve(
 	if !ok {
 		return errors.Errorf("store %d does not exist in the store pool", toStoreID)
 	}
-	conn, err := sp.rpcContext.GRPCDial(detail.desc.Node.Address.String())
+	addr, err := sp.resolver(detail.desc.Node.NodeID)
 	if err != nil {
 		return err
 	}
+	conn, err := sp.rpcContext.GRPCDial(addr.String())
+	if err != nil {
+		return errors.Wrapf(err, "failed to dial store %+v, addr %q, node %+v", toStoreID, addr, detail.desc.Node)
+	}
 
-	client := roachpb.NewInternalClient(conn)
+	client := roachpb.NewInternalStoresClient(conn)
 	req := &roachpb.ReservationRequest{
 		StoreRequestHeader: roachpb.StoreRequestHeader{
 			NodeID:  detail.desc.Node.NodeID,
@@ -465,7 +505,7 @@ func (sp *StorePool) reserve(
 	}
 
 	if log.V(2) {
-		log.Infof("proposing new reservation:%+v", req)
+		log.Infof(context.TODO(), "proposing new reservation:%+v", req)
 	}
 
 	ctxWithTimeout, cancel := context.WithTimeout(context.TODO(), sp.reserveRPCTimeout)
@@ -479,22 +519,26 @@ func (sp *StorePool) reserve(
 	if err != nil {
 		detail.throttledUntil = sp.clock.Now().GoTime().Add(sp.failedReservationsTimeout)
 		if log.V(2) {
-			log.Infof("reservation failed, store:%s will be throttled for %s until %s",
+			log.Infof(context.TODO(), "reservation failed, store:%s will be throttled for %s until %s",
 				toStoreID, sp.failedReservationsTimeout, detail.throttledUntil)
 		}
 		return errors.Wrapf(err, "reservation failed:%+v", req)
 	}
+
+	if resp.RangeCount != nil {
+		detail.desc.Capacity.RangeCount = *resp.RangeCount
+	}
 	if !resp.Reserved {
 		detail.throttledUntil = sp.clock.Now().GoTime().Add(sp.declinedReservationsTimeout)
 		if log.V(2) {
-			log.Infof("reservation failed, store:%s will be throttled for %s until %s",
+			log.Infof(context.TODO(), "reservation failed, store:%s will be throttled for %s until %s",
 				toStoreID, sp.declinedReservationsTimeout, detail.throttledUntil)
 		}
 		return errors.Errorf("reservation declined:%+v", req)
 	}
 
 	if log.V(2) {
-		log.Infof("reservation was approved:%+v", req)
+		log.Infof(context.TODO(), "reservation was approved:%+v", req)
 	}
 	return nil
 }

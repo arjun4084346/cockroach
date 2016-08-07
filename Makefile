@@ -91,33 +91,10 @@ install:
 # eg: to statically build the sql tests, run:
 #   make STATIC=1 testbuild PKG=./sql
 .PHONY: testbuild
-testbuild: GOFLAGS += -c
 testbuild:
-	for p in $(shell $(GO) list -tags '$(TAGS)' $(PKG)); do \
-	  NAME=$$(basename "$$p"); \
-	  OUT="$$NAME.test"; \
-	  DIR=$$($(GO) list -f {{.Dir}} -tags '$(TAGS)' $$p); \
-	  $(GO) test -v $(GOFLAGS) -tags '$(TAGS)' -o "$$DIR"/"$$OUT" -ldflags '$(LDFLAGS)' "$$p" $(TESTFLAGS) || exit 1; \
-	done
-
-# Build all tests into DIR and strips each.
-# DIR is required.
-.PHONY: testbuildall
-testbuildall: GOFLAGS += -c
-testbuildall:
-ifndef DIR
-	$(error DIR is undefined)
-endif
-	for p in $(shell $(GO) list $(PKG)); do \
-	  NAME=$$(basename "$$p"); \
-	  PKGDIR=$$($(GO) list -f {{.ImportPath}} $$p); \
-	  OUTPUT_FILE="$(DIR)/$${PKGDIR}/$${NAME}.test"; \
-	  $(GO) test -v $(GOFLAGS) -tags '$(TAGS)' -o $${OUTPUT_FILE} -ldflags '$(LDFLAGS)' "$$p" $(TESTFLAGS) || exit 1; \
-	  if [ -s $${OUTPUT_FILE} ]; then strip -S $${OUTPUT_FILE}; fi; \
-	  if [ $${NAME} = "sql" ]; then \
-	     cp -r sql/testdata sql/partestdata "$(DIR)/$${PKGDIR}/" || exit 1; \
-	  fi \
-	done
+	$(GO) list -tags '$(TAGS)' -f \
+	'$(GO) test -v $(GOFLAGS) -tags '\''$(TAGS)'\'' -ldflags '\''$(LDFLAGS)'\'' -i -c {{.ImportPath}} -o {{.Dir}}/{{.Name}}.test' $(PKG) | \
+	$(SHELL)
 
 # Similar to "testrace", we want to cache the build before running the
 # tests.
@@ -135,7 +112,7 @@ testslow:
 .PHONY: testraceslow
 testraceslow: TESTFLAGS += -v
 testraceslow:
-	$(GO) test -v $(GOFLAGS) -i $(PKG)
+	$(GO) test -v $(GOFLAGS) -race -i $(PKG)
 	$(GO) test $(GOFLAGS) -race -run "$(TESTS)" -timeout $(RACETIMEOUT) $(PKG) $(TESTFLAGS) | grep -F ': Test' | sed -E 's/(--- PASS: |\(|\))//g' | awk '{ print $$2, $$1 }' | sort -rn | head -n 10
 
 # "go test -i" builds dependencies and installs them into GOPATH/pkg, but does not run the
@@ -162,13 +139,13 @@ coverage:
 # given all tests in the package will be run).
 .PHONY: stress
 stress:
-	$(GO) test -v $(GOFLAGS) -i -c $(PKG) -o stress.test
-	cd $(PKG) && stress $(STRESSFLAGS) $(CURRENTDIR)/stress.test -test.run "$(TESTS)" -test.timeout $(TESTTIMEOUT) $(TESTFLAGS)
+	$(GO) test -v $(GOFLAGS) -i -c $(PKG) -o $(PKG)/stress.test
+	cd $(PKG) && stress $(STRESSFLAGS) ./stress.test -test.run "$(TESTS)" -test.timeout $(TESTTIMEOUT) $(TESTFLAGS)
 
 .PHONY: stressrace
 stressrace:
-	$(GO) test $(GOFLAGS) -race -v -i -c $(PKG) -o stress.test
-	cd $(PKG) && stress $(STRESSFLAGS) $(CURRENTDIR)/stress.test -test.run "$(TESTS)" -test.timeout $(TESTTIMEOUT) $(TESTFLAGS)
+	$(GO) test -v $(GOFLAGS) -i -c $(PKG) -o $(PKG)/stress.test -race
+	cd $(PKG) && stress $(STRESSFLAGS) ./stress.test -test.run "$(TESTS)" -test.timeout $(TESTTIMEOUT) $(TESTFLAGS)
 
 .PHONY: acceptance
 acceptance:
@@ -234,6 +211,10 @@ $(GLOCK):
 .bootstrap: $(GITHOOKS) $(GLOCK) GLOCKFILE
 	@unset GIT_WORK_TREE; $(GLOCK) sync github.com/cockroachdb/cockroach
 	touch $@
+
+.PHONY: upload-coverage
+upload-coverage:
+	@build/upload-coverage.sh
 
 include .bootstrap
 

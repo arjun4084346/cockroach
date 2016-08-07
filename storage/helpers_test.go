@@ -22,11 +22,10 @@
 package storage
 
 import (
-	"sync/atomic"
-
 	"github.com/cockroachdb/cockroach/internal/client"
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/storage/engine/enginepb"
+	"github.com/cockroachdb/cockroach/util/hlc"
 )
 
 // HandleRaftMessage delegates to handleRaftMessage.
@@ -126,10 +125,10 @@ func (s *Store) SetSplitQueueActive(active bool) {
 	s.setSplitQueueActive(active)
 }
 
-// SetReplicaScannerDisabled turns replica scanning off or on as directed. Note
-// that while disabled, removals are still processed.
-func (s *Store) SetReplicaScannerDisabled(disabled bool) {
-	s.scanner.SetDisabled(disabled)
+// SetReplicaScannerActive enables or disables the scanner. Note that while
+// inactive, removals are still processed.
+func (s *Store) SetReplicaScannerActive(active bool) {
+	s.setScannerActive(active)
 }
 
 // GetLastIndex is the same function as LastIndex but it does not require
@@ -140,17 +139,25 @@ func (r *Replica) GetLastIndex() (uint64, error) {
 	return r.LastIndex()
 }
 
-// SetDisabled turns replica scanning off or on as directed. Note that while
-// disabled, removals are still processed.
-func (rs *replicaScanner) SetDisabled(disabled bool) {
-	if disabled {
-		atomic.StoreInt32(&rs.disabled, 1)
-	} else {
-		atomic.StoreInt32(&rs.disabled, 0)
-	}
-}
-
 // GetLease exposes replica.getLease for tests.
 func (r *Replica) GetLease() (*roachpb.Lease, *roachpb.Lease) {
 	return r.getLease()
+}
+
+// GetTimestampCacheLowWater returns the timestamp cache low water mark.
+func (r *Replica) GetTimestampCacheLowWater() hlc.Timestamp {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mu.tsCache.lowWater
+}
+
+func (r *Replica) GetLastFromReplicaDesc() roachpb.ReplicaDescriptor {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mu.lastFromReplica
+}
+
+// GetDeadReplicas exports s.deadReplicas for tests.
+func (s *Store) GetDeadReplicas() roachpb.StoreDeadReplicas {
+	return s.deadReplicas()
 }

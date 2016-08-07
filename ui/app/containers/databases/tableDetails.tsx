@@ -8,7 +8,7 @@ import { databaseName, tableName } from "../../util/constants";
 
 import { AdminUIState } from "../../redux/state";
 import { setUISetting } from "../../redux/ui";
-import { refreshTableDetails, generateTableID } from "../../redux/databaseInfo";
+import { refreshTableDetails, generateTableID } from "../../redux/apiReducers";
 
 import { SortableTable, SortableColumn, SortSetting } from "../../components/sortabletable";
 
@@ -244,7 +244,6 @@ interface TableMainData {
   sortedColumns: Column[];
   sortedIndexes: Index[];
   sortedGrants: Grant[];
-
 }
 
 /**
@@ -335,7 +334,7 @@ class TableMain extends React.Component<TableMainProps, {}> {
 
   componentWillMount() {
     // Refresh databases when mounting.
-    this.props.refreshTableDetails(this.props.params[databaseName], this.props.params[tableName]);
+    this.props.refreshTableDetails({ database: this.props.params[databaseName], table: this.props.params[tableName] });
   }
 
   render() {
@@ -375,7 +374,7 @@ class TableMain extends React.Component<TableMainProps, {}> {
 function getTableDetails(state: AdminUIState, props: IInjectedProps): TableDetailsResponseMessage {
   let db = props.params[databaseName];
   let table = props.params[tableName];
-  let details = state.databaseInfo.tableDetails[generateTableID(db, table)];
+  let details = state.cachedData.tableDetails[generateTableID(db, table)];
   return details && details.data;
 }
 
@@ -433,7 +432,7 @@ let sortedGrants = createSelector(
 
 // Connect the TableMain class with our redux store.
 let tableMainConnected = connect(
-  (state, ownProps) => {
+  (state: AdminUIState, ownProps: IInjectedProps) => {
     return {
       sortedColumns: sortedColumns(state, ownProps),
       sortedIndexes: sortedIndexes(state, ownProps),

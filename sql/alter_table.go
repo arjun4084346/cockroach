@@ -35,18 +35,6 @@ type alterTableNode struct {
 //   notes: postgres requires CREATE on the table.
 //          mysql requires ALTER, CREATE, INSERT on the table.
 func (p *planner) AlterTable(n *parser.AlterTable) (planNode, error) {
-	if err := n.Table.NormalizeTableName(p.session.Database); err != nil {
-		return nil, err
-	}
-
-	dbDesc, err := p.getDatabaseDesc(n.Table.Database())
-	if err != nil {
-		return nil, err
-	}
-	if dbDesc == nil {
-		return nil, sqlbase.NewUndefinedDatabaseError(n.Table.Database())
-	}
-
 	tableDesc, err := p.getTableDesc(n.Table)
 	if err != nil {
 		return nil, err
@@ -89,7 +77,11 @@ func (n *alterTableNode) Start() error {
 					n.tableDesc.Mutations[i].Direction == sqlbase.DescriptorMutation_DROP {
 					return fmt.Errorf("column %q being dropped, try again later", col.Name)
 				}
+				if status == sqlbase.DescriptorActive && t.IfNotExists {
+					continue
+				}
 			}
+
 			n.tableDesc.AddColumnMutation(*col, sqlbase.DescriptorMutation_ADD)
 			if idx != nil {
 				n.tableDesc.AddIndexMutation(*idx, sqlbase.DescriptorMutation_ADD)

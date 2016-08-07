@@ -30,6 +30,8 @@ import (
 	"sync"
 	"unsafe"
 
+	"golang.org/x/net/context"
+
 	"github.com/dustin/go-humanize"
 	"github.com/elastic/gosigar"
 	"github.com/gogo/protobuf/proto"
@@ -66,7 +68,7 @@ const (
 )
 
 func init() {
-	rocksdb.Logger = log.Infof
+	rocksdb.Logger = func(format string, args ...interface{}) { log.Infof(context.TODO(), format, args...) }
 }
 
 // SSTableInfo contains metadata about a single RocksDB sstable. This mirrors
@@ -94,6 +96,10 @@ func (s SSTableInfos) Less(i, j int) bool {
 	case s[i].Level < s[j].Level:
 		return true
 	case s[i].Level > s[j].Level:
+		return false
+	case s[i].Size > s[j].Size:
+		return true
+	case s[i].Size < s[j].Size:
 		return false
 	default:
 		return s[i].Start.Less(s[j].Start)
@@ -127,31 +133,75 @@ func (s SSTableInfos) String() string {
 		}
 	}
 
+	type levelInfo struct {
+		size  int64
+		count int
+	}
+
+	var levels []*levelInfo
+	for _, t := range s {
+		for i := len(levels); i <= t.Level; i++ {
+			levels = append(levels, &levelInfo{})
+		}
+		info := levels[t.Level]
+		info.size += t.Size
+		info.count++
+	}
+
+	var maxSize int
+	var maxLevelCount int
+	for _, info := range levels {
+		size := len(humanize(info.size))
+		if maxSize < size {
+			maxSize = size
+		}
+		count := 1 + int(math.Log10(float64(info.count)))
+		if maxLevelCount < count {
+			maxLevelCount = count
+		}
+	}
+	levelFormat := fmt.Sprintf("%%d [ %%%ds %%%dd ]:", maxSize, maxLevelCount)
+
 	level := -1
 	var buf bytes.Buffer
+	var lastSize string
+	var lastSizeCount int
+
+	flushLastSize := func() {
+		if lastSizeCount > 0 {
+			fmt.Fprintf(&buf, " %s", lastSize)
+			if lastSizeCount > 1 {
+				fmt.Fprintf(&buf, "[%d]", lastSizeCount)
+			}
+			lastSizeCount = 0
+		}
+	}
 
 	maybeFlush := func(newLevel, i int) {
 		if level == newLevel {
 			return
 		}
+		flushLastSize()
 		if buf.Len() > 0 {
 			buf.WriteString("\n")
 		}
 		level = newLevel
 		if level >= 0 {
-			var sum int64
-			for j := i; j < len(s); j++ {
-				if s[j].Level == level {
-					sum += s[j].Size
-				}
-			}
-			fmt.Fprintf(&buf, "%d [%5s]:", level, humanize(sum))
+			info := levels[level]
+			fmt.Fprintf(&buf, levelFormat, level, humanize(info.size), info.count)
 		}
 	}
 
 	for i, t := range s {
 		maybeFlush(t.Level, i)
-		fmt.Fprintf(&buf, " %s", humanize(t.Size))
+		size := humanize(t.Size)
+		if size == lastSize {
+			lastSizeCount++
+		} else {
+			flushLastSize()
+			lastSize = size
+			lastSizeCount = 1
+		}
 	}
 
 	maybeFlush(-1, 0)
@@ -183,7 +233,9 @@ type RocksDBCache struct {
 	cache *C.DBCache
 }
 
-// NewRocksDBCache creates a new cache of the specified size.
+// NewRocksDBCache creates a new cache of the specified size. Note that the
+// cache is refcounted internally and starts out with a refcount of one (i.e.
+// Release() should be called after having used the cache).
 func NewRocksDBCache(cacheSize int64) RocksDBCache {
 	return RocksDBCache{cache: C.DBNewCache(C.uint64_t(cacheSize))}
 }
@@ -196,7 +248,8 @@ func (c RocksDBCache) ref() RocksDBCache {
 }
 
 // Release releases the cache. Note that the cache will continue to be used
-// until all of the RocksDB engines it was attached to have been closed.
+// until all of the RocksDB engines it was attached to have been closed, and
+// that RocksDB engines which use it auto-release when they close.
 func (c RocksDBCache) Release() {
 	if c.cache != nil {
 		C.DBReleaseCache(c.cache)
@@ -253,6 +306,7 @@ func newMemRocksDB(
 		// dir: empty dir == "mem" RocksDB instance.
 		cache:          cache.ref(),
 		memtableBudget: memtableBudget,
+		maxSize:        memtableBudget,
 		stopper:        stopper,
 		deallocated:    make(chan struct{}),
 	}
@@ -282,7 +336,7 @@ func (r *RocksDB) Open() error {
 
 	var ver storageVersion
 	if len(r.dir) != 0 {
-		log.Infof("opening rocksdb instance at %q", r.dir)
+		log.Infof(context.TODO(), "opening rocksdb instance at %q", r.dir)
 
 		// Check the version number.
 		var err error
@@ -296,7 +350,7 @@ func (r *RocksDB) Open() error {
 				versionCurrent, ver, versionMinimum)
 		}
 	} else {
-		log.Infof("opening in memory rocksdb instance")
+		log.Infof(context.TODO(), "opening in memory rocksdb instance")
 
 		// In memory dbs are always current.
 		ver = versionCurrent
@@ -336,15 +390,15 @@ func (r *RocksDB) Open() error {
 // Close closes the database by deallocating the underlying handle.
 func (r *RocksDB) Close() {
 	if r.rdb == nil {
-		log.Errorf("closing unopened rocksdb instance")
+		log.Errorf(context.TODO(), "closing unopened rocksdb instance")
 		return
 	}
 	if len(r.dir) == 0 {
 		if log.V(1) {
-			log.Infof("closing in-memory rocksdb instance")
+			log.Infof(context.TODO(), "closing in-memory rocksdb instance")
 		}
 	} else {
-		log.Infof("closing rocksdb instance at %q", r.dir)
+		log.Infof(context.TODO(), "closing rocksdb instance at %q", r.dir)
 	}
 	if r.rdb != nil {
 		C.DBClose(r.rdb)
@@ -423,7 +477,14 @@ func (r *RocksDB) Capacity() (roachpb.StoreCapacity, error) {
 	fileSystemUsage := gosigar.FileSystemUsage{}
 	dir := r.dir
 	if dir == "" {
-		dir = "/tmp"
+		// This is an in-memory instance. Pretend we're empty since we
+		// don't know better and only use this for testing. Using any
+		// part of the actual file system here can throw off allocator
+		// rebalancing in a hard-to-trace manner. See #7050.
+		return roachpb.StoreCapacity{
+			Capacity:  r.maxSize,
+			Available: r.maxSize,
+		}, nil
 	}
 	if err := fileSystemUsage.Get(dir); err != nil {
 		return roachpb.StoreCapacity{}, err
@@ -711,7 +772,7 @@ func (r *distinctBatch) close() {
 // rocksDBBatchIterator wraps rocksDBIterator and allows reuse of an iterator
 // for the lifetime of a batch.
 type rocksDBBatchIterator struct {
-	rocksDBIterator
+	iter  rocksDBIterator
 	batch *rocksDBBatch
 }
 
@@ -726,38 +787,74 @@ func (r *rocksDBBatchIterator) Close() {
 
 func (r *rocksDBBatchIterator) Seek(key MVCCKey) {
 	r.batch.flushMutations()
-	r.rocksDBIterator.Seek(key)
+	r.iter.Seek(key)
 }
 
 func (r *rocksDBBatchIterator) SeekReverse(key MVCCKey) {
 	r.batch.flushMutations()
-	r.rocksDBIterator.SeekReverse(key)
+	r.iter.SeekReverse(key)
+}
+
+func (r *rocksDBBatchIterator) Valid() bool {
+	return r.iter.Valid()
 }
 
 func (r *rocksDBBatchIterator) Next() {
 	r.batch.flushMutations()
-	r.rocksDBIterator.Next()
+	r.iter.Next()
 }
 
 func (r *rocksDBBatchIterator) Prev() {
 	r.batch.flushMutations()
-	r.rocksDBIterator.Prev()
+	r.iter.Prev()
 }
 
 func (r *rocksDBBatchIterator) NextKey() {
 	r.batch.flushMutations()
-	r.rocksDBIterator.NextKey()
+	r.iter.NextKey()
 }
 
 func (r *rocksDBBatchIterator) PrevKey() {
 	r.batch.flushMutations()
-	r.rocksDBIterator.PrevKey()
+	r.iter.PrevKey()
+}
+
+func (r *rocksDBBatchIterator) ComputeStats(start, end MVCCKey, nowNanos int64) (enginepb.MVCCStats, error) {
+	r.batch.flushMutations()
+	return r.iter.ComputeStats(start, end, nowNanos)
+}
+
+func (r *rocksDBBatchIterator) Key() MVCCKey {
+	return r.iter.Key()
+}
+
+func (r *rocksDBBatchIterator) Value() []byte {
+	return r.iter.Value()
+}
+
+func (r *rocksDBBatchIterator) ValueProto(msg proto.Message) error {
+	return r.iter.ValueProto(msg)
+}
+
+func (r *rocksDBBatchIterator) unsafeKey() MVCCKey {
+	return r.iter.unsafeKey()
+}
+
+func (r *rocksDBBatchIterator) unsafeValue() []byte {
+	return r.iter.unsafeValue()
+}
+
+func (r *rocksDBBatchIterator) Error() error {
+	return r.iter.Error()
+}
+
+func (r *rocksDBBatchIterator) Less(key MVCCKey) bool {
+	return r.iter.Less(key)
 }
 
 type rocksDBBatch struct {
 	parent             *RocksDB
 	batch              *C.DBEngine
-	defers             []func()
 	flushes            int
 	prefixIter         rocksDBBatchIterator
 	normalIter         rocksDBBatchIterator
@@ -778,10 +875,10 @@ func newRocksDBBatch(parent *RocksDB) *rocksDBBatch {
 
 func (r *rocksDBBatch) Close() {
 	r.distinct.close()
-	if i := &r.prefixIter.rocksDBIterator; i.iter != nil {
+	if i := &r.prefixIter.iter; i.iter != nil {
 		i.destroy()
 	}
-	if i := &r.normalIter.rocksDBIterator; i.iter != nil {
+	if i := &r.normalIter.iter; i.iter != nil {
 		i.destroy()
 	}
 	if r.batch != nil {
@@ -868,8 +965,8 @@ func (r *rocksDBBatch) NewIterator(prefix bool) Iterator {
 	if prefix {
 		iter = &r.prefixIter
 	}
-	if iter.rocksDBIterator.iter == nil {
-		iter.rocksDBIterator.init(r.batch, prefix, r)
+	if iter.iter.iter == nil {
+		iter.iter.init(r.batch, prefix, r)
 	}
 	if iter.batch != nil {
 		panic("iterator already in use")
@@ -902,22 +999,12 @@ func (r *rocksDBBatch) Commit() error {
 	C.DBClose(r.batch)
 	r.batch = nil
 
-	// On success, run the deferred functions in reverse order.
-	for i := len(r.defers) - 1; i >= 0; i-- {
-		r.defers[i]()
-	}
-	r.defers = nil
-
 	return nil
 }
 
 func (r *rocksDBBatch) Repr() []byte {
 	r.flushMutations()
 	return cSliceToGoBytes(C.DBBatchRepr(r.batch))
-}
-
-func (r *rocksDBBatch) Defer(fn func()) {
-	r.defers = append(r.defers, fn)
 }
 
 func (r *rocksDBBatch) Distinct() ReadWriter {
@@ -941,8 +1028,8 @@ func (r *rocksDBBatch) flushMutations() {
 		panic(err)
 	}
 	// Force a seek of the underlying iterator on the next Seek/ReverseSeek.
-	r.prefixIter.reseek = true
-	r.normalIter.reseek = true
+	r.prefixIter.iter.reseek = true
+	r.normalIter.iter.reseek = true
 }
 
 type rocksDBIterator struct {

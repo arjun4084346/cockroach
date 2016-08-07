@@ -72,6 +72,9 @@ func (s *stringValue) Type() string {
 }
 
 func (s *stringValue) String() string {
+	if s.val == nil {
+		return ""
+	}
 	return *s.val
 }
 
@@ -383,10 +386,10 @@ func FetchEntriesFromFiles(severity Severity, startTimestamp, endTimestamp int64
 func readAllEntriesFromFile(file FileInfo, startTimestamp, endTimestamp int64, maxEntries int,
 	pattern *regexp.Regexp) ([]Entry, bool, error) {
 	reader, err := GetLogReader(file.Name, true /* restricted */)
-	defer reader.Close()
 	if reader == nil || err != nil {
 		return nil, false, err
 	}
+	defer reader.Close()
 	entries := []Entry{}
 	decoder := NewEntryDecoder(reader)
 	entryBeforeStart := false

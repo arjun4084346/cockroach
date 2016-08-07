@@ -20,6 +20,8 @@ import (
 	"math"
 	"testing"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/config"
 	"github.com/cockroachdb/cockroach/gossip"
 	"github.com/cockroachdb/cockroach/keys"
@@ -38,8 +40,8 @@ func TestSplitQueueShouldQueue(t *testing.T) {
 	defer tc.Stop()
 
 	// Set zone configs.
-	config.TestingSetZoneConfig(2000, &config.ZoneConfig{RangeMaxBytes: 32 << 20})
-	config.TestingSetZoneConfig(2002, &config.ZoneConfig{RangeMaxBytes: 32 << 20})
+	config.TestingSetZoneConfig(2000, config.ZoneConfig{RangeMaxBytes: 32 << 20})
+	config.TestingSetZoneConfig(2002, config.ZoneConfig{RangeMaxBytes: 32 << 20})
 
 	// Despite faking the zone configs, we still need to have a gossip entry.
 	if err := tc.gossip.AddInfoProto(gossip.KeySystemConfig, &config.SystemConfig{}, 0); err != nil {
@@ -72,7 +74,7 @@ func TestSplitQueueShouldQueue(t *testing.T) {
 		{keys.MakeTablePrefix(2001), roachpb.RKeyMax, 32<<20 + 1, true, 1},
 	}
 
-	splitQ := newSplitQueue(nil, tc.gossip)
+	splitQ := newSplitQueue(tc.store, nil, tc.gossip)
 
 	cfg, ok := tc.gossip.GetSystemConfig()
 	if !ok {
@@ -86,7 +88,7 @@ func TestSplitQueueShouldQueue(t *testing.T) {
 			tc.rng.mu.Lock()
 			defer tc.rng.mu.Unlock()
 			ms := enginepb.MVCCStats{KeyBytes: test.bytes}
-			if err := setMVCCStats(tc.rng.store.Engine(), tc.rng.RangeID, ms); err != nil {
+			if err := setMVCCStats(context.Background(), tc.rng.store.Engine(), tc.rng.RangeID, ms); err != nil {
 				t.Fatal(err)
 			}
 			tc.rng.mu.state.Stats = ms

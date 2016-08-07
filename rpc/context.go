@@ -17,7 +17,7 @@
 package rpc
 
 import (
-	"sync"
+	"math"
 	"time"
 
 	"golang.org/x/net/context"
@@ -31,7 +31,9 @@ import (
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/stop"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/cockroachdb/cockroach/util/timeutil"
+	circuit "github.com/rubyist/circuitbreaker"
 )
 
 func init() {
@@ -48,16 +50,17 @@ const (
 // NewServer is a thin wrapper around grpc.NewServer that registers a heartbeat
 // service.
 func NewServer(ctx *Context) *grpc.Server {
-	var s *grpc.Server
-	if ctx.Insecure {
-		s = grpc.NewServer()
-	} else {
+	opts := []grpc.ServerOption{
+		grpc.MaxMsgSize(math.MaxInt32), // TODO(peter,tamird): need tests before lowering
+	}
+	if !ctx.Insecure {
 		tlsConfig, err := ctx.GetServerTLSConfig()
 		if err != nil {
 			panic(err)
 		}
-		s = grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
+		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
 	}
+	s := grpc.NewServer(opts...)
 	RegisterHeartbeatServer(s, &HeartbeatService{
 		clock:              ctx.localClock,
 		remoteClockMonitor: ctx.RemoteClocks,
@@ -85,8 +88,9 @@ type Context struct {
 	localInternalServer roachpb.InternalServer
 
 	conns struct {
-		sync.Mutex
-		cache map[string]connMeta
+		syncutil.Mutex
+		cache    map[string]connMeta
+		breakers map[string]*circuit.Breaker
 	}
 }
 
@@ -104,6 +108,8 @@ func NewContext(baseCtx *base.Context, clock *hlc.Clock, stopper *stop.Stopper) 
 	ctx.RemoteClocks = newRemoteClockMonitor(clock, 10*defaultHeartbeatInterval)
 	ctx.HeartbeatInterval = defaultHeartbeatInterval
 	ctx.HeartbeatTimeout = 2 * defaultHeartbeatInterval
+	ctx.conns.cache = make(map[string]connMeta)
+	ctx.conns.breakers = make(map[string]*circuit.Breaker)
 
 	stopper.RunWorker(func() {
 		<-stopper.ShouldQuiesce()
@@ -133,9 +139,12 @@ func (ctx *Context) SetLocalInternalServer(internalServer roachpb.InternalServer
 }
 
 func (ctx *Context) removeConn(key string, conn *grpc.ClientConn) {
+	if log.V(1) {
+		log.Infof(context.TODO(), "closing %s", key)
+	}
 	if err := conn.Close(); err != nil && !grpcutil.IsClosedConnection(err) {
 		if log.V(1) {
-			log.Errorf("failed to close client connection: %s", err)
+			log.Errorf(context.TODO(), "failed to close client connection: %s", err)
 		}
 	}
 	delete(ctx.conns.cache, key)
@@ -150,32 +159,36 @@ func (ctx *Context) GRPCDial(target string, opts ...grpc.DialOption) (*grpc.Clie
 		return meta.conn, nil
 	}
 
-	var dialOpt grpc.DialOption
-	if ctx.Insecure {
-		dialOpt = grpc.WithInsecure()
-	} else {
-		tlsConfig, err := ctx.GetClientTLSConfig()
-		if err != nil {
-			return nil, err
-		}
-		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+	dialOpt, err := ctx.GRPCDialOption()
+	if err != nil {
+		return nil, err
 	}
 
 	dialOpts := make([]grpc.DialOption, 0, 1+len(opts))
 	dialOpts = append(dialOpts, dialOpt)
 	dialOpts = append(dialOpts, opts...)
 
+	breaker, ok := ctx.conns.breakers[target]
+	if !ok {
+		breaker = NewBreaker()
+		ctx.conns.breakers[target] = breaker
+	}
+	if !breaker.Ready() {
+		return nil, circuit.ErrBreakerOpen
+	}
+
+	if log.V(1) {
+		log.Infof(context.TODO(), "dialing %s", target)
+	}
 	conn, err := grpc.Dial(target, dialOpts...)
 	if err == nil {
-		if ctx.conns.cache == nil {
-			ctx.conns.cache = make(map[string]connMeta)
-		}
 		ctx.conns.cache[target] = connMeta{conn: conn}
 
 		if ctx.Stopper.RunTask(func() {
 			ctx.Stopper.RunWorker(func() {
-				if err := ctx.runHeartbeat(conn, target); err != nil && !grpcutil.IsClosedConnection(err) {
-					log.Error(err)
+				err := ctx.runHeartbeat(conn, breaker, target)
+				if err != nil && !grpcutil.IsClosedConnection(err) {
+					log.Error(context.TODO(), err)
 				}
 				ctx.conns.Lock()
 				ctx.removeConn(target, conn)
@@ -186,6 +199,21 @@ func (ctx *Context) GRPCDial(target string, opts ...grpc.DialOption) (*grpc.Clie
 		}
 	}
 	return conn, err
+}
+
+// GRPCDialOption returns the GRPC dialing option appropriate for the context.
+func (ctx *Context) GRPCDialOption() (grpc.DialOption, error) {
+	var dialOpt grpc.DialOption
+	if ctx.Insecure {
+		dialOpt = grpc.WithInsecure()
+	} else {
+		tlsConfig, err := ctx.GetClientTLSConfig()
+		if err != nil {
+			return dialOpt, err
+		}
+		dialOpt = grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig))
+	}
+	return dialOpt, nil
 }
 
 // setConnHealthy sets the health status of the connection.
@@ -210,7 +238,7 @@ func (ctx *Context) IsConnHealthy(remoteAddr string) bool {
 	return ctx.conns.cache[remoteAddr].healthy
 }
 
-func (ctx *Context) runHeartbeat(cc *grpc.ClientConn, remoteAddr string) error {
+func (ctx *Context) runHeartbeat(cc *grpc.ClientConn, breaker *circuit.Breaker, remoteAddr string) error {
 	request := PingRequest{Addr: ctx.Addr}
 	heartbeatClient := NewHeartbeatClient(cc)
 
@@ -232,8 +260,10 @@ func (ctx *Context) runHeartbeat(cc *grpc.ClientConn, remoteAddr string) error {
 			if grpc.Code(err) == codes.DeadlineExceeded {
 				continue
 			}
+			breaker.Fail()
 			return err
 		}
+		breaker.Success()
 		receiveTime := ctx.localClock.PhysicalTime()
 
 		// Only update the clock offset measurement if we actually got a
@@ -272,5 +302,7 @@ func (ctx *Context) runHeartbeat(cc *grpc.ClientConn, remoteAddr string) error {
 func (ctx *Context) heartbeat(heartbeatClient HeartbeatClient, request PingRequest) (*PingResponse, error) {
 	goCtx, cancel := context.WithTimeout(context.Background(), ctx.HeartbeatTimeout)
 	defer cancel()
+	// NB: We want the request to fail-fast (the default), otherwise we won't be
+	// notified of transport failures.
 	return heartbeatClient.Ping(goCtx, &request)
 }

@@ -37,9 +37,9 @@ type replicaConsistencyQueue struct {
 }
 
 // newReplicaConsistencyQueue returns a new instance of replicaConsistencyQueue.
-func newReplicaConsistencyQueue(gossip *gossip.Gossip) *replicaConsistencyQueue {
+func newReplicaConsistencyQueue(store *Store, gossip *gossip.Gossip) *replicaConsistencyQueue {
 	rcq := &replicaConsistencyQueue{}
-	rcq.baseQueue = makeBaseQueue("replica consistency checker", rcq, gossip, queueConfig{
+	rcq.baseQueue = makeBaseQueue("replica consistency checker", rcq, store, gossip, queueConfig{
 		maxSize:              replicaConsistencyQueueSize,
 		needsLease:           true,
 		acceptsUnsplitRanges: true,
@@ -54,7 +54,7 @@ func (*replicaConsistencyQueue) shouldQueue(now hlc.Timestamp, rng *Replica,
 
 // process() is called on every range for which this node is a lease holder.
 func (q *replicaConsistencyQueue) process(
-	_ context.Context,
+	ctx context.Context,
 	_ hlc.Timestamp,
 	rng *Replica,
 	_ config.SystemConfig,
@@ -62,7 +62,7 @@ func (q *replicaConsistencyQueue) process(
 	req := roachpb.CheckConsistencyRequest{}
 	_, pErr := rng.CheckConsistency(req, rng.Desc())
 	if pErr != nil {
-		log.Error(pErr.GoError())
+		log.Error(ctx, pErr.GoError())
 	}
 	return nil
 }

@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/internal/client"
 	"github.com/cockroachdb/cockroach/sql/parser"
 	"github.com/cockroachdb/cockroach/sql/sqlbase"
@@ -38,8 +40,13 @@ func TestMakeTableDescColumns(t *testing.T) {
 		nullable bool
 	}{
 		{
-			"BIT(1)",
+			"BIT",
 			sqlbase.ColumnType{Kind: sqlbase.ColumnType_INT, Width: 1},
+			true,
+		},
+		{
+			"BIT(3)",
+			sqlbase.ColumnType{Kind: sqlbase.ColumnType_INT, Width: 3},
 			true,
 		},
 		{
@@ -113,7 +120,7 @@ func TestMakeTableDescColumns(t *testing.T) {
 		if err := create.Table.NormalizeTableName(""); err != nil {
 			t.Fatalf("%d: %v", i, err)
 		}
-		schema, err := sqlbase.MakeTableDesc(create, 1)
+		schema, err := MakeTableDesc(create, 1)
 		if err != nil {
 			t.Fatalf("%d: %v", i, err)
 		}
@@ -214,7 +221,7 @@ func TestMakeTableDescIndexes(t *testing.T) {
 		if err := create.Table.NormalizeTableName(""); err != nil {
 			t.Fatalf("%d: %v", i, err)
 		}
-		schema, err := sqlbase.MakeTableDesc(create, 1)
+		schema, err := MakeTableDesc(create, 1)
 		if err != nil {
 			t.Fatalf("%d: %v", i, err)
 		}
@@ -239,7 +246,7 @@ func TestPrimaryKeyUnspecified(t *testing.T) {
 	if err := create.Table.NormalizeTableName(""); err != nil {
 		t.Fatal(err)
 	}
-	desc, err := sqlbase.MakeTableDesc(create, 1)
+	desc, err := MakeTableDesc(create, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,11 +259,11 @@ func TestPrimaryKeyUnspecified(t *testing.T) {
 func TestRemoveLeaseIfExpiring(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	p := planner{}
+	p := planner{session: &Session{context: context.Background()}}
 	mc := hlc.NewManualClock(0)
 	p.leaseMgr = &LeaseManager{LeaseStore: LeaseStore{clock: hlc.NewClock(mc.UnixNano)}}
 	p.leases = make([]*LeaseState, 0)
-	txn := client.Txn{}
+	txn := client.Txn{Context: context.Background()}
 	p.setTxn(&txn)
 
 	if p.removeLeaseIfExpiring(nil) {
@@ -271,7 +278,7 @@ func TestRemoveLeaseIfExpiring(t *testing.T) {
 	txn.UpdateDeadlineMaybe(et)
 
 	if p.removeLeaseIfExpiring(l1) {
-		t.Error("expected false wih a non-expiring lease")
+		t.Error("expected false with a non-expiring lease")
 	}
 	if !p.txn.GetDeadline().Equal(et) {
 		t.Errorf("expected deadline %s but got %s", et, p.txn.GetDeadline())

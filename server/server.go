@@ -32,11 +32,10 @@ import (
 	"golang.org/x/net/context"
 
 	"github.com/elazarl/go-bindata-assetfs"
-	gwruntime "github.com/gengo/grpc-gateway/runtime"
+	gwruntime "github.com/grpc-ecosystem/grpc-gateway/runtime"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 
 	"github.com/cockroachdb/cmux"
 	"github.com/cockroachdb/cockroach/base"
@@ -108,7 +107,7 @@ func NewServer(ctx Context, stopper *stop.Stopper) (*Server, error) {
 	}
 
 	if ctx.Insecure {
-		log.Warning("running in insecure mode, this is strongly discouraged. See --insecure.")
+		log.Warning(context.TODO(), "running in insecure mode, this is strongly discouraged. See --insecure.")
 	}
 	// Try loading the TLS configs before anything else.
 	if _, err := ctx.GetServerTLSConfig(); err != nil {
@@ -130,11 +129,13 @@ func NewServer(ctx Context, stopper *stop.Stopper) (*Server, error) {
 	s.rpcContext = rpc.NewContext(ctx.Context, s.clock, s.stopper)
 	s.rpcContext.HeartbeatCB = func() {
 		if err := s.rpcContext.RemoteClocks.VerifyClockOffset(); err != nil {
-			log.Fatal(err)
+			log.Fatal(context.TODO(), err)
 		}
 	}
+	s.grpc = rpc.NewServer(s.rpcContext)
 
-	s.gossip = gossip.New(s.rpcContext, s.ctx.GossipBootstrapResolvers, s.stopper)
+	gossipRegistry := metric.NewRegistry()
+	s.gossip = gossip.New(s.rpcContext, s.grpc, s.ctx.GossipBootstrapResolvers, s.stopper, gossipRegistry)
 	s.storePool = storage.NewStorePool(
 		s.gossip,
 		s.clock,
@@ -168,7 +169,6 @@ func NewServer(ctx Context, stopper *stop.Stopper) (*Server, error) {
 		s.stopper, txnMetrics)
 	s.db = client.NewDB(sender)
 
-	s.grpc = rpc.NewServer(s.rpcContext)
 	s.raftTransport = storage.NewRaftTransport(storage.GossipAddressResolver(s.gossip), s.grpc, s.rpcContext)
 
 	s.kvDB = kv.NewDBServer(s.ctx.Context, sender, s.stopper)
@@ -184,13 +184,16 @@ func NewServer(ctx Context, stopper *stop.Stopper) (*Server, error) {
 
 	// Set up the DistSQL server
 	distSQLCtx := distsql.ServerContext{
-		DB: s.db,
+		Context:    context.Background(),
+		DB:         s.db,
+		RPCContext: s.rpcContext,
 	}
 	s.distSQLServer = distsql.NewServer(distSQLCtx)
 	distsql.RegisterDistSQLServer(s.grpc, s.distSQLServer)
 
 	// Set up Executor
 	eCtx := sql.ExecutorContext{
+		Context:      context.Background(),
 		DB:           s.db,
 		Gossip:       s.gossip,
 		LeaseManager: s.leaseMgr,
@@ -237,12 +240,14 @@ func NewServer(ctx Context, stopper *stop.Stopper) (*Server, error) {
 	s.recorder.AddNodeRegistry("sql.%s", sqlRegistry)
 	s.recorder.AddNodeRegistry("txn.%s", txnRegistry)
 	s.recorder.AddNodeRegistry("clock-offset.%s", s.rpcContext.RemoteClocks.Registry())
+	s.recorder.AddNodeRegistry("gossip.%s", gossipRegistry)
 
 	s.runtime = status.MakeRuntimeStatSampler(s.clock)
 	s.recorder.AddNodeRegistry("sys.%s", s.runtime.Registry())
 
 	s.node = NewNode(nCtx, s.recorder, s.stopper, txnMetrics, sql.MakeEventLogger(s.leaseMgr))
 	roachpb.RegisterInternalServer(s.grpc, s.node)
+	roachpb.RegisterInternalStoresServer(s.grpc, s.node.InternalStoresServer)
 
 	s.tsDB = ts.NewDB(s.db)
 	s.tsServer = ts.MakeServer(s.tsDB)
@@ -313,13 +318,6 @@ func (s *Server) Start() error {
 	s.ctx.Addr = unresolvedAddr.String()
 	s.rpcContext.SetLocalInternalServer(s.node)
 
-	s.stopper.RunWorker(func() {
-		<-s.stopper.ShouldQuiesce()
-		if err := ln.Close(); err != nil {
-			log.Fatal(err)
-		}
-	})
-
 	m := cmux.New(ln)
 	pgL := m.Match(pgwire.Match)
 	anyL := m.Match(cmux.Any())
@@ -337,7 +335,7 @@ func (s *Server) Start() error {
 	s.stopper.RunWorker(func() {
 		<-s.stopper.ShouldQuiesce()
 		if err := httpLn.Close(); err != nil {
-			log.Fatal(err)
+			log.Fatal(context.TODO(), err)
 		}
 	})
 
@@ -362,13 +360,20 @@ func (s *Server) Start() error {
 	})
 
 	s.stopper.RunWorker(func() {
+		<-s.stopper.ShouldQuiesce()
+		netutil.FatalIfUnexpected(anyL.Close())
+		<-s.stopper.ShouldStop()
+		s.grpc.Stop()
+	})
+
+	s.stopper.RunWorker(func() {
 		netutil.FatalIfUnexpected(s.grpc.Serve(anyL))
 	})
 
 	s.stopper.RunWorker(func() {
-		netutil.FatalIfUnexpected(httpServer.ServeWith(pgL, func(conn net.Conn) {
+		netutil.FatalIfUnexpected(httpServer.ServeWith(s.stopper, pgL, func(conn net.Conn) {
 			if err := s.pgServer.ServeConn(conn); err != nil && !netutil.IsClosedConnection(err) {
-				log.Error(err)
+				log.Error(context.TODO(), err)
 			}
 		}))
 	})
@@ -383,23 +388,24 @@ func (s *Server) Start() error {
 		s.stopper.RunWorker(func() {
 			<-s.stopper.ShouldQuiesce()
 			if err := unixLn.Close(); err != nil {
-				log.Fatal(err)
+				log.Fatal(context.TODO(), err)
 			}
 		})
 
 		s.stopper.RunWorker(func() {
-			netutil.FatalIfUnexpected(httpServer.ServeWith(unixLn, func(conn net.Conn) {
+			netutil.FatalIfUnexpected(httpServer.ServeWith(s.stopper, unixLn, func(conn net.Conn) {
 				if err := s.pgServer.ServeConn(conn); err != nil &&
 					!netutil.IsClosedConnection(err) {
-					log.Error(err)
+					log.Error(context.TODO(), err)
 				}
 			}))
 		})
 	}
 
-	s.gossip.Start(s.grpc, unresolvedAddr)
+	s.gossip.Start(unresolvedAddr)
 
-	if err := s.node.start(unresolvedAddr, s.ctx.Engines, s.ctx.NodeAttributes); err != nil {
+	ctx := context.Background()
+	if err := s.node.start(ctx, unresolvedAddr, s.ctx.Engines, s.ctx.NodeAttributes); err != nil {
 		return err
 	}
 
@@ -413,6 +419,7 @@ func (s *Server) Start() error {
 	s.node.startWriteSummaries(s.ctx.MetricsSampleInterval)
 
 	s.sqlExecutor.SetNodeID(s.node.Descriptor.NodeID)
+	s.distSQLServer.SetNodeID(s.node.Descriptor.NodeID)
 
 	// Create and start the schema change manager only after a NodeID
 	// has been assigned.
@@ -422,10 +429,10 @@ func (s *Server) Start() error {
 	}
 	sql.NewSchemaChangeManager(testingKnobs, *s.db, s.gossip, s.leaseMgr).Start(s.stopper)
 
-	log.Infof("starting %s server at %s", s.ctx.HTTPRequestScheme(), unresolvedHTTPAddr)
-	log.Infof("starting grpc/postgres server at %s", unresolvedAddr)
+	log.Infof(context.TODO(), "starting %s server at %s", s.ctx.HTTPRequestScheme(), unresolvedHTTPAddr)
+	log.Infof(context.TODO(), "starting grpc/postgres server at %s", unresolvedAddr)
 	if len(s.ctx.SocketFile) != 0 {
-		log.Infof("starting postgres server at unix:%s", s.ctx.SocketFile)
+		log.Infof(context.TODO(), "starting postgres server at unix:%s", s.ctx.SocketFile)
 	}
 
 	s.stopper.RunWorker(func() {
@@ -446,30 +453,11 @@ func (s *Server) Start() error {
 		gwruntime.WithMarshalerOption(util.ProtoContentType, protopb),
 		gwruntime.WithMarshalerOption(util.AltProtoContentType, protopb),
 	)
-	gwCtx, gwCancel := context.WithCancel(context.Background())
+	gwCtx, gwCancel := context.WithCancel(ctx)
 	s.stopper.AddCloser(stop.CloserFn(gwCancel))
 
 	// Setup HTTP<->gRPC handlers.
-	var opts []grpc.DialOption
-	if s.ctx.Insecure {
-		opts = append(opts, grpc.WithInsecure())
-	} else {
-		tlsConfig, err := s.ctx.GetClientTLSConfig()
-		if err != nil {
-			return err
-		}
-		opts = append(
-			opts,
-			// TODO(tamird): remove this timeout. It is currently necessary because
-			// GRPC will not actually bail on a bad certificate error - it will just
-			// retry indefinitely. See https://github.com/grpc/grpc-go/issues/622.
-			grpc.WithTimeout(base.NetworkTimeout),
-			grpc.WithBlock(),
-			grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
-		)
-	}
-
-	conn, err := s.rpcContext.GRPCDial(s.ctx.Addr, opts...)
+	conn, err := s.rpcContext.GRPCDial(s.ctx.Addr)
 	if err != nil {
 		return errors.Errorf("error constructing grpc-gateway: %s; are your certificates valid?", err)
 	}
@@ -513,7 +501,7 @@ func (s *Server) Start() error {
 	s.mux.Handle(healthEndpoint, s.status)
 
 	if err := sdnotify.Ready(); err != nil {
-		log.Errorf("failed to signal readiness using systemd protocol: %s", err)
+		log.Errorf(context.TODO(), "failed to signal readiness using systemd protocol: %s", err)
 	}
 
 	return nil

@@ -63,3 +63,31 @@ type TestServerArgs struct {
 	// constructed and it can be gotten through TestServerInterface.Stopper().
 	Stopper *stop.Stopper
 }
+
+// TestClusterArgs contains the parameters one can set when creating a test
+// cluster. It contains a TestServerArgs instance which will be copied over to
+// every server.
+//
+// The zero value means "full replication".
+type TestClusterArgs struct {
+	// ServerArgs will be copied to each constituent TestServer.
+	ServerArgs TestServerArgs
+	// ReplicationMode controls how replication is to be done in the cluster.
+	ReplicationMode TestClusterReplicationMode
+}
+
+// TestClusterReplicationMode represents the replication settings for a TestCluster.
+type TestClusterReplicationMode int
+
+const (
+	// ReplicationAuto means that ranges are replicated according to the
+	// production default zone config. Replication is performed as in
+	// production, by the replication queue.
+	// TestCluster.WaitForFullReplication() can be used to wait for
+	// replication to be stable at any point in a test.
+	ReplicationAuto TestClusterReplicationMode = iota
+	// ReplicationManual means that the split and replication queues of all
+	// servers are stopped, and the test must manually control splitting and
+	// replication through the TestServer.
+	ReplicationManual
+)

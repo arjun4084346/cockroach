@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"fmt"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/sql/parser"
 	"github.com/cockroachdb/cockroach/sql/privilege"
 	"github.com/cockroachdb/cockroach/sql/sqlbase"
@@ -139,7 +141,7 @@ func (p *planner) Insert(
 	}
 
 	if expressions := len(rows.Columns()); expressions > numInputColumns {
-		return nil, fmt.Errorf("INSERT has more expressions than target columns: %d/%d", expressions, numInputColumns)
+		return nil, fmt.Errorf("INSERT error: table %s has %d columns but %d values were supplied", n.Table, numInputColumns, expressions)
 	}
 
 	fkTables := TablesNeededForFKs(*en.tableDesc, CheckInserts)
@@ -250,10 +252,11 @@ func (n *insertNode) Start() error {
 }
 
 func (n *insertNode) Next() (bool, error) {
+	ctx := context.TODO()
 	if next, err := n.run.rows.Next(); !next {
 		if err == nil {
 			// We're done. Finish the batch.
-			err = n.tw.finalize()
+			err = n.tw.finalize(ctx)
 		}
 		return false, err
 	}
@@ -300,7 +303,7 @@ func (n *insertNode) Next() (bool, error) {
 		return false, err
 	}
 
-	_, err := n.tw.row(rowVals)
+	_, err := n.tw.row(ctx, rowVals)
 	if err != nil {
 		return false, err
 	}
@@ -333,17 +336,23 @@ func (p *planner) processColumns(tableDesc *sqlbase.TableDescriptor,
 	cols := make([]sqlbase.ColumnDescriptor, len(node))
 	colIDSet := make(map[sqlbase.ColumnID]struct{}, len(node))
 	for i, n := range node {
-		// TODO(pmattis): If the name is qualified, verify the table name matches
-		// tableDesc.Name.
-		if err := n.NormalizeColumnName(); err != nil {
-			return nil, err
-		}
-		col, err := tableDesc.FindActiveColumnByName(n.Column())
+		// Qualified names in the column list for INSERT and for the LHS
+		// in UPDATE ... SET statements work differently than qualified
+		// column names elsewhere:
+		// - they always start with the column name,
+		// - notation X.Y means access field Y when column X has composite type,
+		// - notation X.* is never allowed.
+		// So NormalizeColumnName() cannot be used here.
+		col, err := tableDesc.FindActiveColumnByName(string(n.Base))
 		if err != nil {
 			return nil, err
 		}
+		if len(n.Indirect) != 0 {
+			// We do not support anything but simple column names yet.
+			return nil, fmt.Errorf("column name \"%s\" cannot be assigned to", n)
+		}
 		if _, ok := colIDSet[col.ID]; ok {
-			return nil, fmt.Errorf("multiple assignments to same column \"%s\"", n.Column())
+			return nil, fmt.Errorf("multiple assignments to same column \"%s\"", n.Base)
 		}
 		colIDSet[col.ID] = struct{}{}
 		cols[i] = col
@@ -385,7 +394,10 @@ func (p *planner) fillDefaults(defaultExprs []parser.TypedExpr,
 						&parser.Tuple{Exprs: append([]parser.Expr(nil), tuple.Exprs...)}
 					tupleCopied = true
 				}
-				if defaultExprs == nil {
+				if defaultExprs == nil || eIdx >= len(defaultExprs) {
+					// The case where eIdx is too large for defaultExprs will be
+					// transformed into an error by the check on the number of
+					// columns in Insert().
 					ret.Tuples[tIdx].Exprs[eIdx] = parser.DNull
 				} else {
 					ret.Tuples[tIdx].Exprs[eIdx] = defaultExprs[eIdx]

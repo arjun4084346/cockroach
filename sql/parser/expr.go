@@ -579,6 +579,19 @@ type QualifiedName struct {
 	origString string
 }
 
+// NewQualifiedNameFromDBAndTable creates a new QualifiedName object from the
+// provided database and table name.
+func NewQualifiedNameFromDBAndTable(db, table string) (*QualifiedName, error) {
+	qname := &QualifiedName{
+		Base:     Name(db),
+		Indirect: Indirection{NameIndirection(table)},
+	}
+	if err := qname.NormalizeTableName(""); err != nil {
+		return nil, err
+	}
+	return qname, nil
+}
+
 // ReturnType implements the TypedExpr interface.
 func (node *QualifiedName) ReturnType() Datum {
 	if qualifiedNameTypes == nil {
@@ -620,6 +633,12 @@ func (node *QualifiedName) NormalizeTableName(database string) error {
 	}
 
 	if len(node.Indirect) > 1 {
+		return fmt.Errorf("invalid table name: %s", node)
+	}
+	switch node.Indirect[0].(type) {
+	case NameIndirection:
+		// Nothing to do.
+	default:
 		return fmt.Errorf("invalid table name: %s", node)
 	}
 	node.normalized = tableName

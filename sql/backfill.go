@@ -19,6 +19,8 @@ package sql
 import (
 	"sort"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/internal/client"
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/sql/parser"
@@ -111,7 +113,7 @@ func (sc *SchemaChanger) runBackfill(lease *sqlbase.TableDescriptor_SchemaChange
 	var addedColumnDescs []sqlbase.ColumnDescriptor
 	var addedIndexDescs []sqlbase.IndexDescriptor
 	if err := sc.db.Txn(func(txn *client.Txn) error {
-		tableDesc, err := getTableDescFromID(txn, sc.tableID)
+		tableDesc, err := sqlbase.GetTableDescFromID(txn, sc.tableID)
 		if err != nil {
 			return err
 		}
@@ -174,7 +176,7 @@ func (sc *SchemaChanger) getTableSpan() (sqlbase.Span, error) {
 	var tableDesc *sqlbase.TableDescriptor
 	if err := sc.db.Txn(func(txn *client.Txn) error {
 		var err error
-		tableDesc, err = getTableDescFromID(txn, sc.tableID)
+		tableDesc, err = sqlbase.GetTableDescFromID(txn, sc.tableID)
 		return err
 	}); err != nil {
 		return sqlbase.Span{}, err
@@ -257,7 +259,7 @@ func (sc *SchemaChanger) truncateAndBackfillColumnsChunk(
 	var curIndexKey roachpb.Key
 	done := false
 	err := sc.db.Txn(func(txn *client.Txn) error {
-		tableDesc, err := getTableDescFromID(txn, sc.tableID)
+		tableDesc, err := sqlbase.GetTableDescFromID(txn, sc.tableID)
 		if err != nil {
 			return err
 		}
@@ -270,7 +272,7 @@ func (sc *SchemaChanger) truncateAndBackfillColumnsChunk(
 		updateCols := append(added, dropped...)
 		fkTables := TablesNeededForFKs(*tableDesc, CheckUpdates)
 		for k := range fkTables {
-			if fkTables[k], err = getTableDescFromID(txn, k); err != nil {
+			if fkTables[k], err = sqlbase.GetTableDescFromID(txn, k); err != nil {
 				return err
 			}
 		}
@@ -353,7 +355,7 @@ func (sc *SchemaChanger) truncateAndBackfillColumnsChunk(
 			for j := len(row); j < len(oldValues); j++ {
 				oldValues[j] = parser.DNull
 			}
-			if _, err := ru.updateRow(writeBatch, oldValues, updateValues); err != nil {
+			if _, err := ru.updateRow(context.TODO(), writeBatch, oldValues, updateValues); err != nil {
 				return err
 			}
 		}
@@ -381,7 +383,7 @@ func (sc *SchemaChanger) truncateIndexes(
 		}
 		*lease = l
 		if err := sc.db.Txn(func(txn *client.Txn) error {
-			tableDesc, err := getTableDescFromID(txn, sc.tableID)
+			tableDesc, err := sqlbase.GetTableDescFromID(txn, sc.tableID)
 			if err != nil {
 				return err
 			}
@@ -390,21 +392,15 @@ func (sc *SchemaChanger) truncateIndexes(
 				return nil
 			}
 
-			indexPrefix := sqlbase.MakeIndexKeyPrefix(tableDesc, desc.ID)
-
-			// Delete the index.
-			indexStartKey := roachpb.Key(indexPrefix)
-			indexEndKey := indexStartKey.PrefixEnd()
-			if log.V(2) {
-				log.Infof("DelRange %s - %s", indexStartKey, indexEndKey)
-			}
-			b := &client.Batch{}
-			b.DelRange(indexStartKey, indexEndKey, false)
-
-			if err := txn.Run(b); err != nil {
+			rd, err := makeRowDeleter(txn, tableDesc, nil, nil, false)
+			if err != nil {
 				return err
 			}
-			return nil
+			td := tableDeleter{rd: rd}
+			if err := td.init(txn); err != nil {
+				return err
+			}
+			return td.deleteIndex(context.TODO(), &desc)
 		}); err != nil {
 			return err
 		}
@@ -458,7 +454,7 @@ func (sc *SchemaChanger) backfillIndexesChunk(
 	var nextKey roachpb.Key
 	done := false
 	err := sc.db.Txn(func(txn *client.Txn) error {
-		tableDesc, err := getTableDescFromID(txn, sc.tableID)
+		tableDesc, err := sqlbase.GetTableDescFromID(txn, sc.tableID)
 		if err != nil {
 			return err
 		}
@@ -520,7 +516,7 @@ func (sc *SchemaChanger) backfillIndexesChunk(
 				}
 				for _, secondaryIndexEntry := range secondaryIndexEntries {
 					if log.V(2) {
-						log.Infof("InitPut %s -> %v", secondaryIndexEntry.Key,
+						log.Infof(context.TODO(), "InitPut %s -> %v", secondaryIndexEntry.Key,
 							secondaryIndexEntry.Value)
 					}
 					b.InitPut(secondaryIndexEntry.Key, &secondaryIndexEntry.Value)

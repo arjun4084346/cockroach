@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cockroachdb/cockroach/internal/client"
 	"github.com/cockroachdb/cockroach/keys"
 	"github.com/cockroachdb/cockroach/sql/parser"
 	"github.com/cockroachdb/cockroach/util/encoding"
@@ -59,6 +60,9 @@ const (
 	// FamilyFormatVersion corresponds to the encoding described in
 	// https://github.com/cockroachdb/cockroach/blob/master/docs/RFCS/sql_column_families.md
 	FamilyFormatVersion
+	// InterleavedFormatVersion corresponds to the encoding described in
+	// https://github.com/cockroachdb/cockroach/blob/master/docs/RFCS/sql_interleaved_tables.md
+	InterleavedFormatVersion
 )
 
 // MutationID is custom type for TableDescriptor mutations.
@@ -113,15 +117,34 @@ func (dir IndexDescriptor_Direction) ToEncodingDirection() (encoding.Direction, 
 	}
 }
 
+// ErrDescriptorNotFound is returned by GetTableDescFromID to signal that a
+// descriptor could not be found with the given id.
+var ErrDescriptorNotFound = errors.New("descriptor not found")
+
+// GetTableDescFromID retrieves the table descriptor for the table
+// ID passed in using an existing txn. Teturns an error if the
+// descriptor doesn't exist or if it exists and is not a table.
+func GetTableDescFromID(txn *client.Txn, id ID) (*TableDescriptor, error) {
+	desc := &Descriptor{}
+	descKey := MakeDescMetadataKey(id)
+
+	if err := txn.GetProto(descKey, desc); err != nil {
+		return nil, err
+	}
+	table := desc.GetTable()
+	if table == nil {
+		return nil, ErrDescriptorNotFound
+	}
+	return table, nil
+}
+
 // allocateName sets desc.Name to a value that is not EqualName to any
 // of tableDesc's indexes. allocateName roughly follows PostgreSQL's
 // convention for automatically-named indexes.
 func (desc *IndexDescriptor) allocateName(tableDesc *TableDescriptor) {
-	segments := make([]string, 0, len(desc.ColumnIDs)+2)
+	segments := make([]string, 0, len(desc.ColumnNames)+2)
 	segments = append(segments, tableDesc.Name)
-	for _, columnName := range desc.ColumnNames {
-		segments = append(segments, columnName)
-	}
+	segments = append(segments, desc.ColumnNames...)
 	if desc.Unique {
 		segments = append(segments, "key")
 	} else {
@@ -263,7 +286,7 @@ func generatedFamilyName(familyID FamilyID, columnNames []string) string {
 // FormatVersion (if it's not already there) and returns true if any changes
 // were made.
 func (desc *TableDescriptor) MaybeUpgradeFormatVersion() bool {
-	if desc.FormatVersion == FamilyFormatVersion {
+	if desc.FormatVersion >= FamilyFormatVersion {
 		return false
 	}
 
@@ -530,16 +553,153 @@ func (desc *TableDescriptor) AllocateIDs() error {
 	if desc.ID == 0 {
 		desc.ID = keys.MaxReservedDescID + 1
 	}
-	err := desc.Validate()
+	err := desc.ValidateTable()
 	desc.ID = savedID
 	return err
 }
 
 // Validate validates that the table descriptor is well formed. Checks include
-// validating the table, column and index names, verifying that column names
-// and index names are unique and verifying that column IDs and index IDs are
-// consistent.
-func (desc *TableDescriptor) Validate() error {
+// both single table and cross table invariants.
+func (desc *TableDescriptor) Validate(txn *client.Txn) error {
+	err := desc.ValidateTable()
+	if err != nil {
+		return err
+	}
+	return desc.validateCrossReferences(txn)
+}
+
+// validateCrossReferences validates that each reference to another table is
+// resolvable and that the necessary back references exist.
+func (desc *TableDescriptor) validateCrossReferences(txn *client.Txn) error {
+	tablesByID := map[ID]*TableDescriptor{desc.ID: desc}
+	getTable := func(id ID) (*TableDescriptor, error) {
+		if table, ok := tablesByID[id]; ok {
+			return table, nil
+		}
+		table, err := GetTableDescFromID(txn, id)
+		if err != nil {
+			return nil, err
+		}
+		tablesByID[id] = table
+		return table, nil
+	}
+
+	findTargetIndex := func(tableID ID, indexID IndexID) (*TableDescriptor, *IndexDescriptor, error) {
+		targetTable, err := getTable(tableID)
+		if err != nil {
+			return nil, nil, errors.Wrapf(err, "missing table=%d index=%d", tableID, indexID)
+		}
+		targetIndex, err := targetTable.FindIndexByID(indexID)
+		if err != nil {
+			return nil, nil, errors.Wrapf(err, "missing table=%s index=%d", targetTable.Name, indexID)
+		}
+		return targetTable, targetIndex, nil
+	}
+
+	for _, index := range desc.AllNonDropIndexes() {
+		// Check foreign keys.
+		if index.ForeignKey.IsSet() {
+			targetTable, targetIndex, err := findTargetIndex(
+				index.ForeignKey.Table, index.ForeignKey.Index)
+			if err != nil {
+				return errors.Wrap(err, "invalid foreign key")
+			}
+			found := false
+			for _, backref := range targetIndex.ReferencedBy {
+				if backref.Table == desc.ID && backref.Index == index.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return errors.Errorf("missing fk back reference to %s.%s from %s.%s",
+					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+			}
+		}
+		fkBackrefs := make(map[ForeignKeyReference]struct{})
+		for _, backref := range index.ReferencedBy {
+			if _, ok := fkBackrefs[backref]; ok {
+				return errors.Errorf("duplicated fk backreference %+v", backref)
+			}
+			fkBackrefs[backref] = struct{}{}
+			targetTable, err := getTable(backref.Table)
+			if err != nil {
+				return errors.Wrapf(err, "invalid fk backreference table=%d index=%d",
+					backref.Table, backref.Index)
+			}
+			targetIndex, err := targetTable.FindIndexByID(backref.Index)
+			if err != nil {
+				return errors.Wrapf(err, "invalid fk backreference table=%s index=%d",
+					targetTable.Name, backref.Index)
+			}
+			if fk := targetIndex.ForeignKey; fk.Table != desc.ID || fk.Index != index.ID {
+				return errors.Errorf("broken fk backward reference from %s.%s to %s.%s",
+					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+			}
+		}
+
+		// Check interleaves.
+		if len(index.Interleave.Ancestors) > 0 {
+			// Only check the most recent ancestor, the rest of them don't point
+			// back.
+			ancestor := index.Interleave.Ancestors[len(index.Interleave.Ancestors)-1]
+			targetTable, targetIndex, err := findTargetIndex(ancestor.TableID, ancestor.IndexID)
+			if err != nil {
+				return errors.Wrap(err, "invalid interleave")
+			}
+			found := false
+			for _, backref := range targetIndex.InterleavedBy {
+				if backref.Table == desc.ID && backref.Index == index.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return errors.Errorf(
+					"missing interleave back reference to %s.%s from %s.%s",
+					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+			}
+		}
+		interleaveBackrefs := make(map[ForeignKeyReference]struct{})
+		for _, backref := range index.InterleavedBy {
+			if _, ok := interleaveBackrefs[backref]; ok {
+				return errors.Errorf("duplicated interleave backreference %+v", backref)
+			}
+			interleaveBackrefs[backref] = struct{}{}
+			targetTable, err := getTable(backref.Table)
+			if err != nil {
+				return errors.Wrapf(err, "invalid interleave backreference table=%d index=%d",
+					backref.Table, backref.Index)
+			}
+			targetIndex, err := targetTable.FindIndexByID(backref.Index)
+			if err != nil {
+				return errors.Wrapf(err, "invalid interleave backreference table=%s index=%d",
+					targetTable.Name, backref.Index)
+			}
+			if len(targetIndex.Interleave.Ancestors) == 0 {
+				return errors.Errorf(
+					"broken interleave backward reference from %s.%s to %s.%s",
+					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+			}
+			// The last ancestor is required to be a backreference.
+			ancestor := targetIndex.Interleave.Ancestors[len(targetIndex.Interleave.Ancestors)-1]
+			if ancestor.TableID != desc.ID || ancestor.IndexID != index.ID {
+				return errors.Errorf(
+					"broken interleave backward reference from %s.%s to %s.%s",
+					desc.Name, index.Name, targetTable.Name, targetIndex.Name)
+			}
+		}
+	}
+	// TODO(dan): Also validate SharedPrefixLen in the interleaves.
+	return nil
+}
+
+// ValidateTable validates that the table descriptor is well formed. Checks
+// include validating the table, column and index names, verifying that column
+// names and index names are unique and verifying that column IDs and index IDs
+// are consistent. Use Validate to validate that cross-table references are
+// correct.
+func (desc *TableDescriptor) ValidateTable() error {
 	if err := validateName(desc.Name, "table"); err != nil {
 		return err
 	}
@@ -553,13 +713,20 @@ func (desc *TableDescriptor) Validate() error {
 		return fmt.Errorf("invalid parent ID %d", desc.ParentID)
 	}
 
-	// TODO(dan): Once a beta with this check is released, update the reference
-	// tests with it as the new bidirectional compatibility version. Then remove
-	// support here for BaseFormatVersion.
-	if v := desc.GetFormatVersion(); v != BaseFormatVersion && v != FamilyFormatVersion {
+	// We maintain forward compatibility, so if you see this error message with a
+	// version older that what this client supports, then there's a
+	// MaybeUpgradeFormatVersion missing from some codepath.
+	if v := desc.GetFormatVersion(); v != FamilyFormatVersion && v != InterleavedFormatVersion {
+		// TODO(dan): We're currently switching from FamilyFormatVersion to
+		// InterleavedFormatVersion. After a beta is released with this dual version
+		// support, then:
+		// - Upgrade the bidirectional reference version to that beta
+		// - Start constructing all TableDescriptors with InterleavedFormatVersion
+		// - Change MaybeUpgradeFormatVersion to output InterleavedFormatVersion
+		// - Change this check to only allow InterleavedFormatVersion
 		return fmt.Errorf(
 			"table %q is encoded using using version %d, but this client only supports version %d and %d",
-			desc.Name, desc.GetFormatVersion(), BaseFormatVersion, FamilyFormatVersion)
+			desc.Name, desc.GetFormatVersion(), FamilyFormatVersion, InterleavedFormatVersion)
 	}
 
 	if len(desc.Columns) == 0 {
@@ -636,6 +803,8 @@ func (desc *TableDescriptor) Validate() error {
 			return errors.Errorf("mutation in state %s, direction %s, and no column/index descriptor", m.State, m.Direction)
 		}
 	}
+
+	// TODO(dt): Validate each column only appears at-most-once in any FKs.
 
 	if len(desc.Families) < 1 {
 		return fmt.Errorf("at least 1 column family must be specified")
@@ -727,7 +896,7 @@ func (desc *TableDescriptor) Validate() error {
 			}
 		}
 
-		if index.ForeignKey != nil {
+		if index.ForeignKey.IsSet() {
 			if err := uniqConstraint(index.ForeignKey.Name); err != nil {
 				return err
 			}
@@ -831,13 +1000,25 @@ func upperBoundColumnValueEncodedSize(col ColumnDescriptor) (int, bool) {
 // becomes an issue, make the bookkeeping of the columnSizesByID incremental.
 func fitColumnToFamily(desc TableDescriptor, col ColumnDescriptor) (int, bool) {
 	size, isBounded := upperBoundColumnValueEncodedSize(col)
-	if !isBounded || size > FamilyHeuristicTargetBytes {
+	if size > FamilyHeuristicTargetBytes {
 		return 0, false
+	}
+
+	primaryIndexColIDs := make(map[ColumnID]struct{}, len(desc.PrimaryIndex.ColumnIDs))
+	for _, colID := range desc.PrimaryIndex.ColumnIDs {
+		primaryIndexColIDs[colID] = struct{}{}
 	}
 
 	columnSizesByID := make(map[ColumnID]int, len(desc.Columns))
 	for _, c := range desc.Columns {
-		if columnSizesByID[c.ID], isBounded = upperBoundColumnValueEncodedSize(c); !isBounded {
+		if _, ok := primaryIndexColIDs[c.ID]; ok {
+			// Primary key columns are stored in the key, so they don't count
+			// against the heuristic limit.
+			columnSizesByID[c.ID] = 0
+			continue
+		}
+		var bounded bool
+		if columnSizesByID[c.ID], bounded = upperBoundColumnValueEncodedSize(c); !bounded {
 			// Not bounded in size, so exceed the heuristic max to avoid assigning to
 			// a family that this column is in.
 			columnSizesByID[c.ID] = FamilyHeuristicTargetBytes + 1
@@ -855,7 +1036,7 @@ func fitColumnToFamily(desc TableDescriptor, col ColumnDescriptor) (int, bool) {
 				break
 			}
 		}
-		if familySize+size <= FamilyHeuristicTargetBytes {
+		if familySize == 0 || (isBounded && familySize+size <= FamilyHeuristicTargetBytes) {
 			return i, true
 		}
 	}
@@ -972,6 +1153,20 @@ func (desc *TableDescriptor) RenameColumn(colID ColumnID, newColName string) {
 	}
 }
 
+// FindActiveColumnsByNames finds all requested columns (in the requested order)
+// or returns an error.
+func (desc *TableDescriptor) FindActiveColumnsByNames(names parser.NameList) ([]ColumnDescriptor, error) {
+	cols := make([]ColumnDescriptor, len(names))
+	for i := range names {
+		c, err := desc.FindActiveColumnByName(names[i])
+		if err != nil {
+			return nil, err
+		}
+		cols[i] = c
+	}
+	return cols, nil
+}
+
 // FindColumnByName finds the column with the specified name. It returns
 // DescriptorStatus for the column, and an index into either the columns
 // (status == DescriptorActive) or mutations (status == DescriptorIncomplete).
@@ -1078,6 +1273,20 @@ func (desc *TableDescriptor) FindIndexByID(id IndexID) (*IndexDescriptor, error)
 		}
 	}
 	return nil, fmt.Errorf("index-id \"%d\" does not exist", id)
+}
+
+// IsInterleaved returns true if any part of this this table is interleaved with
+// another table's data.
+func (desc *TableDescriptor) IsInterleaved() bool {
+	for _, index := range desc.AllNonDropIndexes() {
+		if len(index.Interleave.Ancestors) > 0 {
+			return true
+		}
+		if len(index.InterleavedBy) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // MakeMutationComplete updates the descriptor upon completion of a mutation.
@@ -1300,4 +1509,9 @@ func (desc *Descriptor) GetName() string {
 	default:
 		return ""
 	}
+}
+
+// IsSet returns whether or not the foreign key actually references a table.
+func (f ForeignKeyReference) IsSet() bool {
+	return f.Table != 0
 }

@@ -696,7 +696,6 @@ func (t *logicTest) processTestFile(path string) error {
 			t.success(path)
 
 		case "halt", "hash-threshold":
-			break
 
 		case "user":
 			if len(fields) < 2 {
@@ -768,11 +767,7 @@ func (t *logicTest) processTestFile(path string) error {
 		}
 	}
 
-	if err := s.Err(); err != nil {
-		return err
-	}
-
-	return nil
+	return s.Err()
 }
 
 // verifyError checks that either no error was found where none was

@@ -32,14 +32,12 @@ import (
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/rpc"
 	"github.com/cockroachdb/cockroach/security"
-	"github.com/cockroachdb/cockroach/sql/sqlbase"
 	"github.com/cockroachdb/cockroach/storage"
 	"github.com/cockroachdb/cockroach/storage/engine"
 	"github.com/cockroachdb/cockroach/ts"
 	"github.com/cockroachdb/cockroach/util"
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/metric"
-	"github.com/cockroachdb/cockroach/util/retry"
 	"github.com/cockroachdb/cockroach/util/stop"
 	"github.com/pkg/errors"
 )
@@ -93,7 +91,7 @@ func makeTestContextFromParams(params base.TestServerArgs) Context {
 	ctx := makeTestContext()
 	ctx.TestingKnobs = params.Knobs
 	if params.JoinAddr != "" {
-		ctx.JoinUsing = params.JoinAddr
+		ctx.JoinList = []string{params.JoinAddr}
 	}
 	ctx.Insecure = params.Insecure
 	ctx.SocketFile = params.SocketFile
@@ -118,7 +116,7 @@ func makeTestContextFromParams(params base.TestServerArgs) Context {
 	if params.SSLCertKey != "" {
 		ctx.SSLCertKey = params.SSLCertKey
 	}
-	ctx.JoinUsing = params.JoinAddr
+	ctx.JoinList = []string{params.JoinAddr}
 	return ctx
 }
 
@@ -257,7 +255,8 @@ func (ts *TestServer) Start(params base.TestServerArgs) error {
 // assuming no additional information is added outside of the normal bootstrap
 // process.
 func ExpectedInitialRangeCount() int {
-	return GetBootstrapSchema().DescriptorCount() - sqlbase.NumSystemDescriptors + 1
+	bootstrap := GetBootstrapSchema()
+	return bootstrap.SystemDescriptorCount() - bootstrap.SystemConfigDescriptorCount() + 1
 }
 
 // WaitForInitialSplits waits for the server to complete its expected initial
@@ -305,16 +304,6 @@ func (ts *TestServer) ServingHost() (string, error) {
 func (ts *TestServer) ServingPort() (string, error) {
 	_, p, err := net.SplitHostPort(ts.ServingAddr())
 	return p, err
-}
-
-// SetRangeRetryOptions sets the retry options for stores in TestServer.
-func (ts *TestServer) SetRangeRetryOptions(ro retry.Options) {
-	if err := ts.node.stores.VisitStores(func(s *storage.Store) error {
-		s.SetRangeRetryOptions(ro)
-		return nil
-	}); err != nil {
-		panic(err)
-	}
 }
 
 // WriteSummaries implements TestServerInterface.
@@ -405,7 +394,7 @@ func (ts *TestServer) GetFirstStoreID() roachpb.StoreID {
 
 type testServerFactoryImpl struct{}
 
-// TestServerFactory can be passed to testingshim.InitTestServerFactory
+// TestServerFactory can be passed to serverutils.InitTestServerFactory
 var TestServerFactory = testServerFactoryImpl{}
 
 // New is part of TestServerFactory interface.

@@ -50,8 +50,8 @@ func benchmarkCockroach(b *testing.B, f func(b *testing.B, db *gosql.DB)) {
 func benchmarkMultinodeCockroach(b *testing.B, f func(b *testing.B, db *gosql.DB)) {
 	defer tracing.Disable()()
 	tc := testcluster.StartTestCluster(b, 3,
-		testcluster.ClusterArgs{
-			ReplicationMode: testcluster.ReplicationFull,
+		base.TestClusterArgs{
+			ReplicationMode: base.ReplicationAuto,
 			ServerArgs: base.TestServerArgs{
 				UseDatabase: "bench",
 			},
@@ -84,11 +84,11 @@ func benchmarkPostgres(b *testing.B, f func(b *testing.B, db *gosql.DB)) {
 	// ```
 	// $ cat /usr/local/var/postgres/postgresql.conf | grep ssl
 	// ssl = on                            # (change requires restart)
-	// ssl_cert_file = '/Users/tamird/src/go/src/github.com/cockroachdb/cockroach/resource/test_certs/node.server.crt'             # (change requires restart)
-	// ssl_key_file = '/Users/tamird/src/go/src/github.com/cockroachdb/cockroach/resource/test_certs/node.server.key'              # (change requires restart)
-	// ssl_ca_file = '/Users/tamird/src/go/src/github.com/cockroachdb/cockroach/resource/test_certs/ca.crt'                        # (change requires restart)
+	// ssl_cert_file = '$GOATH/src/github.com/cockroachdb/cockroach/resource/test_certs/node.server.crt'             # (change requires restart)
+	// ssl_key_file = '$GOATH/src/github.com/cockroachdb/cockroach/resource/test_certs/node.server.key'              # (change requires restart)
+	// ssl_ca_file = '$GOATH/src/github.com/cockroachdb/cockroach/resource/test_certs/ca.crt'                        # (change requires restart)
 	// ```
-	// Where `/Users/tamird/src/go/src/github.com/cockroachdb/cockroach`
+	// Where `$GOATH/src/github.com/cockroachdb/cockroach`
 	// is replaced with your local Cockroach source directory.
 	// Be sure to restart Postgres for this to take effect.
 
@@ -912,6 +912,71 @@ func BenchmarkScan10000FilterLimit50Multinode_Cockroach(b *testing.B) {
 
 func BenchmarkScan10000FilterLimit50_Postgres(b *testing.B) {
 	benchmarkPostgres(b, filterLimitBenchFn(50))
+}
+
+func runBenchmarkInterleavedSelect(b *testing.B, db *gosql.DB, count int) {
+	if _, err := db.Exec(`DROP TABLE IF EXISTS bench.interleaved_select1`); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE IF EXISTS bench.interleaved_select2`); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE bench.interleaved_select1 (a INT PRIMARY KEY, b INT)`); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE bench.interleaved_select2 (c INT PRIMARY KEY, d INT) INTERLEAVE IN PARENT interleaved_select1 (c)`); err != nil {
+		b.Fatal(err)
+	}
+
+	var buf1 bytes.Buffer
+	var buf2 bytes.Buffer
+	buf1.WriteString(`INSERT INTO bench.interleaved_select1 VALUES `)
+	buf2.WriteString(`INSERT INTO bench.interleaved_select2 VALUES `)
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			buf1.WriteString(", ")
+		}
+		fmt.Fprintf(&buf1, "(%d, %d)", i, i)
+		if i%4 == 0 {
+			if i > 0 {
+				buf2.WriteString(", ")
+			}
+			fmt.Fprintf(&buf2, "(%d, %d)", i, i)
+		}
+	}
+	if _, err := db.Exec(buf1.String()); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := db.Exec(buf2.String()); err != nil {
+		b.Fatal(err)
+	}
+
+	query := `SELECT * FROM bench.interleaved_select1 is1 INNER JOIN bench.interleaved_select2 is2 on is1.a = is2.c`
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, err := db.Query(query)
+		if err != nil {
+			b.Fatal(err)
+		}
+		n := 0
+		for rows.Next() {
+			n++
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			b.Fatal(err)
+		}
+		expected := count / 4
+		if n != expected {
+			b.Fatalf("unexpected result count: %d (expected %d)", n, expected)
+		}
+	}
+	b.StopTimer()
+}
+
+func BenchmarkInterleavedSelect1000_Cockroach(b *testing.B) {
+	benchmarkCockroach(b, func(b *testing.B, db *gosql.DB) { runBenchmarkInterleavedSelect(b, db, 1000) })
 }
 
 // runBenchmarkOrderBy benchmarks scanning a table and sorting the results.

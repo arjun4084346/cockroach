@@ -19,7 +19,6 @@ package storage
 
 import (
 	"net"
-	"sync"
 	"time"
 
 	"github.com/coreos/etcd/raft/raftpb"
@@ -30,7 +29,10 @@ import (
 	"github.com/cockroachdb/cockroach/gossip"
 	"github.com/cockroachdb/cockroach/roachpb"
 	"github.com/cockroachdb/cockroach/rpc"
+	"github.com/cockroachdb/cockroach/util/log"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/cockroachdb/cockroach/util/timeutil"
+	"github.com/rubyist/circuitbreaker"
 )
 
 const (
@@ -84,9 +86,10 @@ type RaftTransport struct {
 	SnapshotStatusChan chan RaftSnapshotStatus
 
 	mu struct {
-		sync.Mutex
+		syncutil.Mutex
 		handlers map[roachpb.StoreID]raftMessageHandler
-		queues   map[bool]map[roachpb.ReplicaDescriptor]chan *RaftMessageRequest
+		queues   map[bool]map[roachpb.ReplicaIdent]chan *RaftMessageRequest
+		breakers map[roachpb.NodeID]*circuit.Breaker
 	}
 }
 
@@ -105,7 +108,8 @@ func NewRaftTransport(resolver NodeAddressResolver, grpcServer *grpc.Server, rpc
 		SnapshotStatusChan: make(chan RaftSnapshotStatus),
 	}
 	t.mu.handlers = make(map[roachpb.StoreID]raftMessageHandler)
-	t.mu.queues = make(map[bool]map[roachpb.ReplicaDescriptor]chan *RaftMessageRequest)
+	t.mu.queues = make(map[bool]map[roachpb.ReplicaIdent]chan *RaftMessageRequest)
+	t.mu.breakers = make(map[roachpb.NodeID]*circuit.Breaker)
 
 	if grpcServer != nil {
 		RegisterMultiRaftServer(grpcServer, t)
@@ -170,25 +174,66 @@ func (t *RaftTransport) Stop(storeID roachpb.StoreID) {
 	t.mu.Unlock()
 }
 
-// processQueue creates a client and sends messages from its designated queue
-// via that client, exiting when the client fails or when it idles out. All
-// messages remaining in the queue at that point are lost and a new instance of
-// processQueue should be started by the next message to be sent.
-// TODO(tschottdorf) should let raft know if the node is down;
-// need a feedback mechanism for that. Potentially easiest is to arrange for
-// the next call to Send() to fail appropriately.
-func (t *RaftTransport) processQueue(ch chan *RaftMessageRequest, toReplica roachpb.ReplicaDescriptor) error {
-	addr, err := t.resolver(toReplica.NodeID)
-	if err != nil {
+// GetCircuitBreaker returns the circuit breaker controlling
+// connection attempts to the specified node.
+// NOTE: For unittesting.
+func (t *RaftTransport) GetCircuitBreaker(nodeID roachpb.NodeID) *circuit.Breaker {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.mu.breakers[nodeID]
+}
+
+// getNodeConn returns a shared instance of a GRPC connection to the
+// node specified by nodeID. Returns null if the remote node is not
+// available (e.g. because the node ID can't be resolved or the remote
+// node is not responding or is timing out, or the network is
+// partitioned, etc.).
+func (t *RaftTransport) getNodeConn(nodeID roachpb.NodeID) *grpc.ClientConn {
+	t.mu.Lock()
+	breaker, ok := t.mu.breakers[nodeID]
+	if !ok {
+		breaker = rpc.NewBreaker()
+		t.mu.breakers[nodeID] = breaker
+	}
+	t.mu.Unlock()
+
+	// The number of consecutive failures suffered by the circuit breaker is used
+	// to log only state changes in our node address resolution status.
+	consecFailures := breaker.ConsecFailures()
+	var addr net.Addr
+	if err := breaker.Call(func() error {
+		var err error
+		addr, err = t.resolver(nodeID)
 		return err
+	}, 0); err != nil {
+		if consecFailures == 0 {
+			log.Warningf(context.TODO(), "failed to resolve node %s: %s", nodeID, err)
+		}
+		return nil
+	}
+	if consecFailures > 0 {
+		log.Infof(context.TODO(), "resolved node %s to %s", nodeID, addr)
 	}
 
+	// GRPC connections are opened asynchronously and internally have a circuit
+	// breaking mechanism based on heartbeat successes and failures.
 	conn, err := t.rpcContext.GRPCDial(addr.String())
 	if err != nil {
-		return err
+		if errors.Cause(err) != circuit.ErrBreakerOpen {
+			log.Infof(context.TODO(), "failed to connect to %s", addr)
+		}
+		return nil
 	}
-	client := NewMultiRaftClient(conn)
+	return conn
+}
 
+// processQueue opens a Raft client stream and sends messages from the
+// designated queue (ch) via that stream, exiting when an error is received or
+// when it idles out. All messages remaining in the queue at that point are
+// lost and a new instance of processQueue will be started by the next message
+// to be sent.
+func (t *RaftTransport) processQueue(ch chan *RaftMessageRequest, conn *grpc.ClientConn) error {
+	client := NewMultiRaftClient(conn)
 	ctx, cancel := context.WithCancel(context.TODO())
 	defer cancel()
 	stream, err := client.RaftMessage(ctx)
@@ -263,29 +308,45 @@ func (s RaftSender) SendAsync(req *RaftMessageRequest) bool {
 	}
 	isSnap := req.Message.Type == raftpb.MsgSnap
 	toReplica := req.ToReplica
+	toReplicaIdent := roachpb.ReplicaIdent{
+		RangeID: req.RangeID,
+		Replica: toReplica,
+	}
+
 	s.transport.mu.Lock()
 	// We use two queues; one will be used for snapshots, the other for all other
 	// traffic. This is done to prevent snapshots from blocking other traffic.
 	queues, ok := s.transport.mu.queues[isSnap]
 	if !ok {
-		queues = make(map[roachpb.ReplicaDescriptor]chan *RaftMessageRequest)
+		queues = make(map[roachpb.ReplicaIdent]chan *RaftMessageRequest)
 		s.transport.mu.queues[isSnap] = queues
 	}
-	ch, ok := queues[toReplica]
+	ch, ok := queues[toReplicaIdent]
 	if !ok {
 		ch = make(chan *RaftMessageRequest, raftSendBufferSize)
-		queues[toReplica] = ch
+		queues[toReplicaIdent] = ch
 	}
 	s.transport.mu.Unlock()
 
 	if !ok {
+		// Get a connection to the node specified by the replica's node
+		// ID. If no connection can be made, return false to indicate caller
+		// should drop the Raft message.
+		conn := s.transport.getNodeConn(toReplica.NodeID)
+		if conn == nil {
+			s.transport.mu.Lock()
+			delete(queues, toReplicaIdent)
+			s.transport.mu.Unlock()
+			return false
+		}
+
 		// Starting workers in a task prevents data races during shutdown.
 		if err := s.transport.rpcContext.Stopper.RunTask(func() {
 			s.transport.rpcContext.Stopper.RunWorker(func() {
-				s.onError(s.transport.processQueue(ch, toReplica), toReplica)
+				s.onError(s.transport.processQueue(ch, conn), toReplica)
 
 				s.transport.mu.Lock()
-				delete(queues, toReplica)
+				delete(queues, toReplicaIdent)
 				s.transport.mu.Unlock()
 			})
 		}); err != nil {

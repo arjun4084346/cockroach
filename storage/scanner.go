@@ -21,9 +21,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/context"
+
 	"github.com/cockroachdb/cockroach/util/hlc"
 	"github.com/cockroachdb/cockroach/util/log"
 	"github.com/cockroachdb/cockroach/util/stop"
+	"github.com/cockroachdb/cockroach/util/syncutil"
 	"github.com/cockroachdb/cockroach/util/timeutil"
 )
 
@@ -82,14 +85,14 @@ type replicaScanner struct {
 // loop that function will be called.
 func newReplicaScanner(targetInterval, maxIdleTime time.Duration, replicas replicaSet) *replicaScanner {
 	if targetInterval <= 0 {
-		log.Fatalf("scanner interval must be greater than zero")
+		log.Fatalf(context.TODO(), "scanner interval must be greater than zero")
 	}
 	return &replicaScanner{
 		targetInterval: targetInterval,
 		maxIdleTime:    maxIdleTime,
 		replicas:       replicas,
 		removed:        make(chan *Replica, 10),
-		completedScan:  sync.NewCond(&sync.Mutex{}),
+		completedScan:  sync.NewCond(&syncutil.Mutex{}),
 	}
 }
 
@@ -115,11 +118,21 @@ func (rs *replicaScanner) Count() int64 {
 	return rs.count
 }
 
+// SetDisabled turns replica scanning off or on as directed. Note that while
+// disabled, removals are still processed.
+func (rs *replicaScanner) SetDisabled(disabled bool) {
+	if disabled {
+		atomic.StoreInt32(&rs.disabled, 1)
+	} else {
+		atomic.StoreInt32(&rs.disabled, 0)
+	}
+}
+
 // avgScan returns the average scan time of each scan cycle. Used in unittests.
 func (rs *replicaScanner) avgScan() time.Duration {
 	rs.completedScan.L.Lock()
 	defer rs.completedScan.L.Unlock()
-	return time.Duration(rs.total.Nanoseconds() / int64(rs.count))
+	return time.Duration(rs.total.Nanoseconds() / rs.count)
 }
 
 // RemoveReplica removes a replica from any replica queues the scanner may
@@ -157,7 +170,7 @@ func (rs *replicaScanner) waitAndProcess(start time.Time, clock *hlc.Clock, stop
 	waitInterval := rs.paceInterval(start, timeutil.Now())
 	rs.waitTimer.Reset(waitInterval)
 	if log.V(6) {
-		log.Infof("Wait time interval set to %s", waitInterval)
+		log.Infof(context.TODO(), "Wait time interval set to %s", waitInterval)
 	}
 	for {
 		select {
@@ -184,7 +197,7 @@ func (rs *replicaScanner) waitAndProcess(start time.Time, clock *hlc.Clock, stop
 				q.MaybeRemove(repl)
 			}
 			if log.V(6) {
-				log.Infof("removed replica %s", repl)
+				log.Infof(context.TODO(), "removed replica %s", repl)
 			}
 
 		case <-stopper.ShouldStop():
@@ -224,7 +237,7 @@ func (rs *replicaScanner) scanLoop(clock *hlc.Clock, stopper *stop.Stopper) {
 				rs.completedScan.Broadcast()
 				rs.completedScan.L.Unlock()
 				if log.V(6) {
-					log.Infof("reset replica scan iteration")
+					log.Infof(context.TODO(), "reset replica scan iteration")
 				}
 
 				// Reset iteration and start time.

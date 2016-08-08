@@ -116,20 +116,6 @@ func (k MVCCKey) Less(l MVCCKey) bool {
 	return l.Timestamp.Less(k.Timestamp)
 }
 
-// added by Arjun, to do key comparison according to the observed data!!
-func (k MVCCKey) Less2(l MVCCKey) bool {		//15.Less2(16) => false
-	if c := k.Key.Compare(l.Key); c != 0 {		//15.Less2(14) => true
-		return c < 0														//12
-	}																					//14
-	if !l.IsValue() {													//16
-		return false
-	}
-	if !k.IsValue() {		// adding this according to the observed data, not found anywhere in the doc though. -Arjun
-		return true
-	}
-	return l.Timestamp.Less(k.Timestamp)
-}
-
 // Equal returns whether two keys are identical.
 func (k MVCCKey) Equal(l MVCCKey) bool {
 	return k.Key.Compare(l.Key) == 0 && k.Timestamp == l.Timestamp
@@ -810,7 +796,7 @@ func mvccGetInternal(
 	if allowedSafety == unsafeValue {
 		value.RawBytes = iter.unsafeValue()
 	} else {
-		value.RawBytes = iter.Value()				//IT IS GETTING SET HERE
+		value.RawBytes = iter.Value()
 	}
 	value.Timestamp = unsafeKey.Timestamp
 	if err := value.Verify(metaKey.Key); err != nil {

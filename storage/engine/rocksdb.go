@@ -1108,20 +1108,15 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
-			if(false && strings.Compare(r.Key().Key.String(), "/Table/2/1/0/\"bank\"/3/1")==0) {
-				r.setECSState(ECSIterSeek(key, r.prefix, true, true, false))
+			r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
-					//((r.Key().Key.Compare(r.getECSKey().Key)==0)&&(!r.Key().IsValue()))) {		//ignore contradicting info for now!! :(
 					r.replace = true
 					//fmt.Printf(".")
 				} else {
-					//fmt.Printf("Seeked - %s, % x, len %d, %v, %v %v\n", key, []byte(key.Key), len(key.Key), key.Timestamp.WallTime, key.Timestamp.Logical, r.prefix)
-					//fmt.Printf("rock   - %s, % x, len %d, %v, %v\n", r.Key(), []byte(r.Key().Key), len(r.Key().Key), r.Key().Timestamp.WallTime, r.Key().Timestamp.Logical)
-					//fmt.Printf("ecs    - %s, % x, len %d, %v, %v\n\n", r.getECSKey(), []byte(r.getECSKey().Key), len(r.getECSKey().Key), r.getECSKey().Timestamp.WallTime, r.getECSKey().Timestamp.Logical)
+					fmt.Printf("Seeked - %s, % x, len %d, %v, %v %v\n", key, []byte(key.Key), len(key.Key), key.Timestamp.WallTime, key.Timestamp.Logical, r.prefix)
+					fmt.Printf("rock   - %s, % x, len %d, %v, %v\n", r.Key(), []byte(r.Key().Key), len(r.Key().Key), r.Key().Timestamp.WallTime, r.Key().Timestamp.Logical)
+					fmt.Printf("ecs    - %s, % x, len %d, %v, %v\n\n", r.getECSKey(), []byte(r.getECSKey().Key), len(r.getECSKey().Key), r.getECSKey().Timestamp.WallTime, r.getECSKey().Timestamp.Logical)
 				}
-			}	else {
-				r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))
-			}	// Here goes my code to replace Rocks Iterator  -Arjun
 		} else {
 			r.replace = false
 		}
@@ -1132,18 +1127,17 @@ func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
 	r.replace = false
 	r.checkEngineOpen()
 	if len(key.Key) == 0 {
-		r.setState(C.DBIterSeekToLast(r.iter))		// not yet implemented ECSIterSeekToLast  -Arjun
+		r.setState(C.DBIterSeekToLast(r.iter))
 	} else {
 		// We can avoid seeking if we're already at the key we seek.
 		if r.valid && !r.reseek && key.Equal(r.unsafeKey()) {
 			return
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
-		// Maybe the key sorts after the last key in RocksDB.
 		if !r.Valid() {
 			r.setState(C.DBIterSeekToLast(r.iter))
-			if(qualifiedKey(key.String())) {		//NOT IMPLEMENTED YET!!!
-				r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+			if(qualifiedKey(key.String())) {
+				r.setECSState(ECSIterSeekReverse(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {
 					r.replace = true
 				}
@@ -1165,10 +1159,6 @@ func (r *rocksDBIterator) Valid() bool {
 	return r.valid
 }
 
-func (r *rocksDBIterator) ECSValid() bool {
-	return r.ECSvalid
-}
-
 func (r *rocksDBIterator) Next() {
 	r.checkEngineOpen()
 	oldKey := r.Key()
@@ -1188,7 +1178,6 @@ func (r *rocksDBIterator) Next() {
 			r.replace = true
 		} else {
 			r.replace = false
-			//fmt.Printf("curr  key - %s\nrock next - %s\necs  next - %s\n\n", oldKey, newKey, keyNow)
 		}
 	}
 }
@@ -1231,7 +1220,7 @@ func (r *rocksDBIterator) NextKey() {
 		} else {
 			r.replace = false
 			r.ECSvalid = false
-			//fmt.Printf("curr  key - %s\nrock next - %s\necs  next - %s\n\n", oldKey, newKey, keyNow)
+			fmt.Printf("curr  key - %s\nrock next - %s\necs  next - %s\n\n", oldKey, newKey, keyNow)
 		}
 	}
 }
@@ -1612,7 +1601,7 @@ func dbClear(rdb *C.DBEngine, key MVCCKey) error {
 		return emptyKeyError()
 	}
 	if qualifiedKey(key.String()) {
-		_ = deleteObject(goToECSKey(key), key)
+		return deleteObject(goToECSKey(key), key)
 	}
 	return statusToError(C.DBDelete(rdb, goToCKey(key)))
 }

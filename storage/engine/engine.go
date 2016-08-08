@@ -42,7 +42,6 @@ type Iterator interface {
 	// iterator which hasn't been seeked or has gone past the end of the
 	// key range is invalid.
 	Valid() bool
-	ECSValid() bool
 
 	// Next advances the iterator to the next key/value in the
 	// iteration. After this call, Valid() will be true if the

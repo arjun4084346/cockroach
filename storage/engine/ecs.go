@@ -34,7 +34,7 @@ import (
 // KV_MAP is a Golang map, used as a in-mem primitive cache
 
 var BUCKET string = "b1"
-const ENDPOINT string = "http://10.247.78.171:9020"
+const ENDPOINT string = "http://10.247.78.217:9020"
 var KV_MAP = map[string][]byte{}
 
 // RocksDB->ECS change could not be tested on all the KV data.
@@ -45,12 +45,9 @@ var KV_MAP = map[string][]byte{}
 // qualifiedKey returns true if the key represents the tables we are handling data from.
 // Tables we are skiping are : lease, UI, eventlog, rangelog, system, meta and local
 func qualifiedKey(keyStr string) bool {
-	//return false
 	if(!(strings.Contains(keyStr, "/Table/11") || strings.Contains(keyStr, "/Table/14")  ||			//lease && ui
-	strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
-	//strings.Contains(keyStr, "/Table/3") || strings.Contains(keyStr, "/Table/2") || 				//descriptor && namespace
-		//strings.Contains(keyStr, "/Table/1") || strings.Contains(keyStr, "/Table/4") || strings.Contains(keyStr, "/Table/5") || // system && users && zones
-	strings.Contains(keyStr, "/Local") || strings.Contains(keyStr, "Meta") || strings.Contains(keyStr, "System"))) {
+			 strings.Contains(keyStr, "/Table/12") || strings.Contains(keyStr, "/Table/13")  ||				//eventlog && rangelog
+			 strings.HasPrefix(keyStr, "/Local") || strings.HasPrefix(keyStr, "/Meta") || strings.HasPrefix(keyStr, "/System"))) {
 		return true
 	} else {
 		return false
@@ -61,7 +58,7 @@ func qualifiedKey(keyStr string) bool {
 // engine.rocksDBIterator.replace is true, true signifies that the iterator holds
 // the data fetched from ECS, and can be used by getECSKey() getECSValue() functions
 func qualifiedIter(iter Iterator) bool {
-	if iter.(*rocksDBIterator).replace && iter.(*rocksDBIterator).ECSvalid {	//ecsvalid not required coz replace is getting reset everyime needed
+	if iter.(*rocksDBIterator).replace && iter.(*rocksDBIterator).ECSvalid {	//ECSvalid not required coz replace is getting reset everyime needed
 		return true
 	}
 	return false
@@ -85,12 +82,11 @@ func getObject(key []byte) ([]byte, error){
 		Key:    aws.String(keyStr),
 	})
 	if(err != nil) {
-		return []byte("Error"), err
+		return nil, err
 	} else {
 		defer output.Body.Close()
 		buf := bytes.NewBuffer(nil)
 		if _, err := io.Copy(buf, output.Body); err != nil {
-			fmt.Println("Error : Object parsing failed!!")
 			return nil, err
 		}
 		value := buf.Bytes()
@@ -100,7 +96,7 @@ func getObject(key []byte) ([]byte, error){
 }
 
 // deleteObject deletes the ECS object identified by mvcckey
-func deleteObject(key []byte, mvcckey MVCCKey) string {
+func deleteObject(key []byte, mvcckey MVCCKey) error {
 	fmt.Printf("DELETING %s\n", mvcckey)
 	keyStr := hex.EncodeToString(key)
 	delete(KV_MAP, keyStr)
@@ -111,14 +107,14 @@ func deleteObject(key []byte, mvcckey MVCCKey) string {
 		Key:    aws.String(keyStr),
 	})
 	if(err != nil) {
-		return "Error"
+		fmt.Println(output)
 	}
-	return output.String()
+	return err
 }
 
 // createObject stores a key-value pair into the ECS
 // value is also stored in the KV_MAP
-func createObject(key []byte, value []byte, mvcckey MVCCKey) string{
+func createObject(key []byte, value []byte, mvcckey MVCCKey) error {
 	keyStr := hex.EncodeToString(key)
 	fmt.Printf("INSERTING %s\n", mvcckey)
 
@@ -129,11 +125,13 @@ func createObject(key []byte, value []byte, mvcckey MVCCKey) string{
 		Bucket: aws.String(BUCKET),
 		Key: aws.String(keyStr),
 	})
-	if(err != nil) {
-		return "Error"
+	if(err == nil) {
+		KV_MAP[keyStr] = value
+	} else {
+		fmt.Println(output)
 	}
-	KV_MAP[keyStr] = value
-	return output.String()
+
+	return err
 }
 
 func check(e error, msg string) {

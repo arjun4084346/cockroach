@@ -64,7 +64,7 @@ func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 	newTimestamp := SK.Timestamp
 	copy(newKey, SK.Key)
 
-	if l := len(SK.Key); l == 0 {			// Why sometimes SK.Key is null!! -Arjun
+	if l := len(SK.Key); l == 0 {
 		return ECSIterState{valid:false}
 	}
 	if skip_current_key_versions {
@@ -168,7 +168,6 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 		if (prefix || SK.IsValue()) && !key.IsValue() {		// It is observed that when prefix is true in the cockroach iterator or when search key
 																											// has timestamp, key without timestamp is not where iterator seeks to. Though I have not
 																											// read this anywhere in documentation. -Arjun
-			//fmt.Println("skipping", key)
 			continue
 		}
 		if debug {
@@ -241,12 +240,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 					}
 				}
 			} else {
-				/*tschanged := false
-					if key.Timestamp==hlc.ZeroTimestamp {
-						tschanged = true
-						key.Timestamp = hlc.MaxTimestamp
-					}*/
-					if key.Timestamp.Less(effectiveSKTS) || effectiveSKTS.Equal(key.Timestamp){
+				if key.Timestamp.Less(effectiveSKTS) || effectiveSKTS.Equal(key.Timestamp){
 						if debug {
 							fmt.Println("considering2", key, SK.Timestamp.WallTime)
 						}
@@ -257,9 +251,6 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 						if currDiff.Less(maxDiffTS) {
 							maxDiffTS = currDiff
 							oldkey = key
-							/*if tschanged {
-								oldkey.Timestamp = hlc.ZeroTimestamp
-							}*/
 							if debug {
 								fmt.Println("accepted for now2", key)
 							}

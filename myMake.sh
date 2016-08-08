@@ -2,8 +2,6 @@
 killall -9 cockroach
 rm -rf cockroach
 ./e.sh
-echo "" > log
-echo "" > log2
 rm -rf ./node1
 #rm -rf ./node2
 #rm -rf ./node3

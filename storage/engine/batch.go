@@ -179,7 +179,7 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	extra := int(l) + maxVarintLen32
 
 	pos := len(b.repr)
-	b.encodeKey(key, extra)
+	b.encodeKey(key, extra)		//check what this function does with the key!! -Arjun
 	b.repr[pos] = tag
 
 	pos = len(b.repr) - extra
@@ -187,17 +187,7 @@ func (b *rocksDBBatchBuilder) encodeKeyValue(key MVCCKey, value []byte, tag byte
 	b.repr = b.repr[:len(b.repr)-(maxVarintLen32-n)]
 
 	if(qualifiedKey(key.String())) {
-		_ = createObject(key, value)
-
-		/*f, _ := os.OpenFile("/tmp/log", os.O_APPEND|os.O_WRONLY, 0600)
-		_, _ = f.WriteString(key.String() + " : ")
-		if(len(value) == 0) {
-			_, _ = f.WriteString("NULL\n")
-		} else {
-			_, _ = f.WriteString("something\n")
-			defer f.Close()
-			f.Sync()
-		}*/
+		_ = createObject(goToECSKey(key), value, key)
 	}
 	copy(b.repr[pos + n:], value)
 }

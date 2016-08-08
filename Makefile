@@ -201,7 +201,7 @@ GLOCK := ../../../../bin/glock
 #        ^  ^  ^  ^~ GOPATH
 #        |  |  |~ GOPATH/src
 #        |  |~ GOPATH/src/github.com
-#        |~ GOPATH/src/github.com/arjun4084346
+#        |~ GOPATH/src/github.com/cockroachdb
 
 $(GLOCK):
 	$(GO) get github.com/robfig/glock
@@ -209,7 +209,7 @@ $(GLOCK):
 # Update the git hooks and run the bootstrap script whenever any
 # of them (or their dependencies) change.
 .bootstrap: $(GITHOOKS) $(GLOCK) GLOCKFILE
-	@unset GIT_WORK_TREE; $(GLOCK) sync github.com/arjun4084346/cockroach
+	@unset GIT_WORK_TREE; $(GLOCK) sync github.com/cockroachdb/cockroach
 	touch $@
 
 .PHONY: upload-coverage

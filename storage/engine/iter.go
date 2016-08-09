@@ -55,7 +55,7 @@ func ECSIterPrev(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 		Key 			: newKey,
 		Timestamp	: newTimestamp,
 	}
-	return ECSIterSeekReverse(newSK, false, false, false, skip_current_key_versions)
+	return ECSIterSeekReverse(newSK, false, false)
 }
 
 func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
@@ -76,12 +76,12 @@ func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 		Key 			: newKey,
 		Timestamp	: newTimestamp,
 	}
-	return ECSIterSeek(newSK, false, debug, false, skip_current_key_versions)
+	return ECSIterSeek(newSK, false, debug, false)
 }
 
-func ECSIterSeekReverse(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekFirst bool) ECSIterState {
+func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 	if reGetList {
-		getList(goToECSKey(SK), prefix, SK, debug)
+		getList(goToECSKey(SK), prefix)
 	}
 	for e := keyList.Back(); e != nil; e = e.Prev() {
 		key := e.Value.(MVCCKey)
@@ -156,9 +156,9 @@ func ECSIterSeekReverse(SK MVCCKey, prefix bool, debug bool, reGetList bool, see
 // SK 		- key being seeked
 // prefix - when prefix is true, only keys with SK.key as a prefix are searched in ECS
 // debug	- this is just for debugging purpose, can be safely removed
-func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast bool) ECSIterState {
+func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterState {
 	if reGetList {
-		getList(goToECSKey(SK), prefix, SK, debug)
+		getList(goToECSKey(SK), prefix)
 	}
 	if debug {
 		fmt.Println("seeked", SK)
@@ -274,8 +274,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 // getList fetches the key list from ECS ans store them in keyList
 // prefixKey	- prefix to be search for
 // prefix			- if prefix is true, prefix matching is done with prefixKey
-// SK, debug	- only for debugging purposes
-func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
+func getList(prefixKey []byte, prefix bool ) {
 	keyStr := hex.EncodeToString(prefixKey)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))

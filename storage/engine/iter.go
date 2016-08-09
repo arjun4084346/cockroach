@@ -55,11 +55,10 @@ func ECSIterPrev(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 		Key 			: newKey,
 		Timestamp	: newTimestamp,
 	}
-	return ECSIterSeekReverse(newSK, false, false, false, skip_current_key_versions)
+	return ECSIterSeekReverse(newSK, false, false, skip_current_key_versions)
 }
 
 func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
-	debug := false
 	newKey := make([]byte, len(SK.Key))
 	newTimestamp := SK.Timestamp
 	copy(newKey, SK.Key)
@@ -76,12 +75,12 @@ func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 		Key 			: newKey,
 		Timestamp	: newTimestamp,
 	}
-	return ECSIterSeek(newSK, false, debug, false, skip_current_key_versions)
+	return ECSIterSeek(newSK, false, false, skip_current_key_versions)
 }
 
-func ECSIterSeekReverse(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekFirst bool) ECSIterState {
+func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool, seekFirst bool) ECSIterState {
 	if reGetList {
-		getList(goToECSKey(SK), prefix, SK, debug)
+		getList(goToECSKey(SK), prefix)
 	}
 	for e := keyList.Back(); e != nil; e = e.Prev() {
 		key := e.Value.(MVCCKey)
@@ -156,12 +155,9 @@ func ECSIterSeekReverse(SK MVCCKey, prefix bool, debug bool, reGetList bool, see
 // SK 		- key being seeked
 // prefix - when prefix is true, only keys with SK.key as a prefix are searched in ECS
 // debug	- this is just for debugging purpose, can be safely removed
-func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast bool) ECSIterState {
+func ECSIterSeek(SK MVCCKey, prefix bool, reGetList bool, seekLast bool) ECSIterState {
 	if reGetList {
-		getList(goToECSKey(SK), prefix, SK, debug)
-	}
-	if debug {
-		fmt.Println("seeked", SK)
+		getList(goToECSKey(SK), prefix)
 	}
 	for e := keyList.Front(); e != nil; e = e.Next() {
 		key := e.Value.(MVCCKey)
@@ -170,9 +166,6 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 																											// read this anywhere in documentation. -Arjun
 			continue
 		}
-		if debug {
-			fmt.Println("comparing", SK, "to", key)
-		}
 		var c int
 		if c = SK.Key.Compare(key.Key); c > 0 {
 			continue
@@ -180,20 +173,11 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 		var keyChanged bool
 		if c==0 {
 			keyChanged = false
-			if debug {
-				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
-			}
 		} else {
 			keyChanged = true
-			if debug {
-				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
-			}
 		}
 		if false && keyChanged {
 			if !key.IsValue() {
-				if debug {
-					fmt.Println("returning through new protocol", key)
-				}
 				return ECSIterState{
 					key:		key,
 					valid:	true,
@@ -210,9 +194,6 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 			}
 		}
 		oldkey := MVCCKey{Key:key.Key, Timestamp:key.Timestamp}
-		if debug {
-			fmt.Println("key set to", oldkey)
-		}
 		minDiffTS := hlc.ZeroTimestamp
 		maxDiffTS := hlc.MaxTimestamp
 		var currDiff hlc.Timestamp
@@ -221,13 +202,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 			if key.Key.Compare(oldkey.Key) != 0 {
 				break
 			}
-			if debug {
-				fmt.Println("comparing with", key)
-			}
 			if keyChanged {
-				if debug {
-					fmt.Println("considering1", key, SK.Timestamp.WallTime)
-				}
 				currDiff = hlc.Timestamp {
 					WallTime	:	key.Timestamp.WallTime - effectiveSKTS.WallTime,
 					Logical		:	key.Timestamp.Logical - effectiveSKTS.Logical,
@@ -235,15 +210,9 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 				if !currDiff.Less(minDiffTS) {	//we want max diff, biggest timestamp key
 					minDiffTS = currDiff
 					oldkey = key
-					if debug {
-						fmt.Println("accepted for now1", key)
-					}
 				}
 			} else {
 				if key.Timestamp.Less(effectiveSKTS) || effectiveSKTS.Equal(key.Timestamp){
-						if debug {
-							fmt.Println("considering2", key, SK.Timestamp.WallTime)
-						}
 						currDiff = hlc.Timestamp {
 							WallTime	:	effectiveSKTS.WallTime-key.Timestamp.WallTime,
 							Logical		:	effectiveSKTS.Logical-key.Timestamp.Logical,
@@ -251,15 +220,9 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 						if currDiff.Less(maxDiffTS) {
 							maxDiffTS = currDiff
 							oldkey = key
-							if debug {
-								fmt.Println("accepted for now2", key)
-							}
 						}
 					}
 			}
-		}
-		if debug {
-			fmt.Println("returning", oldkey)
 		}
 		return ECSIterState{
 			key:		oldkey,
@@ -274,8 +237,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool, seekLast b
 // getList fetches the key list from ECS ans store them in keyList
 // prefixKey	- prefix to be search for
 // prefix			- if prefix is true, prefix matching is done with prefixKey
-// SK, debug	- only for debugging purposes
-func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
+func getList(prefixKey []byte, prefix bool) {
 	keyStr := hex.EncodeToString(prefixKey)
 	sess := session.New()
 	svc := s3.New(sess, aws.NewConfig().WithRegion("us-west-2").WithEndpoint(ENDPOINT).WithS3ForcePathStyle(true))
@@ -292,7 +254,7 @@ func getList(prefixKey []byte, prefix bool, SK MVCCKey, debug bool) {
 		})
 	}
 	if err != nil {
-		fmt.Println("error!!!", err.Error())
+		fmt.Println(err.Error(), output)
 		return
 	}
 	s3Contents := output.Contents

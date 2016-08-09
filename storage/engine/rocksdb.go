@@ -1069,6 +1069,7 @@ func newRocksDBIterator(rdb *C.DBEngine, prefix bool, engine Reader) Iterator {
 	// as well.
 	r := iterPool.Get().(*rocksDBIterator)
 	r.init(rdb, prefix, engine)
+	r.prefix = prefix
 	return r
 }
 
@@ -1108,7 +1109,7 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
-			r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+			r.setECSState(ECSIterSeek(key, r.prefix, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
 					r.replace = true
 					//fmt.Printf(".")
@@ -1137,7 +1138,7 @@ func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
 		if !r.Valid() {
 			r.setState(C.DBIterSeekToLast(r.iter))
 			if(qualifiedKey(key.String())) {
-				r.setECSState(ECSIterSeekReverse(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+				r.setECSState(ECSIterSeekReverse(key, r.prefix, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {
 					r.replace = true
 				}

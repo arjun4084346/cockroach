@@ -1,7 +1,8 @@
 #./cockroach quit
 killall -9 cockroach
 rm -rf cockroach
-./e.sh
+aws s3 rb s3://b1 --endpoint-url http://10.247.78.217:9020 --force
+s3curl.pl --id=personal --createBucket -- http://10.247.78.217:9020/b1
 rm -rf ./node1
 #rm -rf ./node2
 #rm -rf ./node3

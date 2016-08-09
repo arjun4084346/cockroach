@@ -1069,7 +1069,6 @@ func newRocksDBIterator(rdb *C.DBEngine, prefix bool, engine Reader) Iterator {
 	// as well.
 	r := iterPool.Get().(*rocksDBIterator)
 	r.init(rdb, prefix, engine)
-	r.prefix = prefix
 	return r
 }
 
@@ -1109,14 +1108,14 @@ func (r *rocksDBIterator) Seek(key MVCCKey) {
 		}
 		r.setState(C.DBIterSeek(r.iter, goToCKey(key)))
 		if(qualifiedKey(key.String())) {
-			r.setECSState(ECSIterSeek(key, r.prefix, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+			r.setECSState(ECSIterSeek(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {// ||
 					r.replace = true
 					//fmt.Printf(".")
 				} else {
-					fmt.Printf("Seeked - %s, % x, len %d, %v, %v %v\n", key, []byte(key.Key), len(key.Key), key.Timestamp.WallTime, key.Timestamp.Logical, r.prefix)
-					fmt.Printf("rock   - %s, % x, len %d, %v, %v\n", r.Key(), []byte(r.Key().Key), len(r.Key().Key), r.Key().Timestamp.WallTime, r.Key().Timestamp.Logical)
-					fmt.Printf("ecs    - %s, % x, len %d, %v, %v\n\n", r.getECSKey(), []byte(r.getECSKey().Key), len(r.getECSKey().Key), r.getECSKey().Timestamp.WallTime, r.getECSKey().Timestamp.Logical)
+					fmt.Printf("Seeked - %s %v\n", key, r.prefix)
+					fmt.Printf("rock   - %s\n", r.Key())
+					fmt.Printf("ecs    - %s\n\n", r.getECSKey())
 				}
 		} else {
 			r.replace = false
@@ -1138,7 +1137,7 @@ func (r *rocksDBIterator) SeekReverse(key MVCCKey) {
 		if !r.Valid() {
 			r.setState(C.DBIterSeekToLast(r.iter))
 			if(qualifiedKey(key.String())) {
-				r.setECSState(ECSIterSeekReverse(key, r.prefix, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
+				r.setECSState(ECSIterSeekReverse(key, r.prefix, false, true, false))		// Here goes my code to replace Rocks Iterator  -Arjun
 				if(strings.Compare(r.getECSKey().String(), r.Key().String())==0 || r.getECSKey().Equal(r.Key())) {
 					r.replace = true
 				}

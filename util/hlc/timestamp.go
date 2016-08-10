@@ -37,6 +37,29 @@ func (t Timestamp) Less(s Timestamp) bool {
 	return t.WallTime < s.WallTime || (t.WallTime == s.WallTime && t.Logical < s.Logical)
 }
 
+func (t Timestamp) EffectiveLess(s Timestamp) bool {
+	if t == ZeroTimestamp {
+		return false
+	}
+	if s == ZeroTimestamp {
+		return true
+	}
+	return t.WallTime < s.WallTime || (t.WallTime == s.WallTime && t.Logical < s.Logical)
+}
+
+func (t Timestamp) Minus(s Timestamp) Timestamp {
+	if t == ZeroTimestamp {
+		t = MaxTimestamp
+	}
+	if s == ZeroTimestamp {
+		s = MaxTimestamp
+	}
+	return Timestamp {
+		WallTime	:	t.WallTime-s.WallTime,
+		Logical		:	t.Logical-s.Logical,
+	}
+}
+
 // Equal returns whether two timestamps are the same.
 func (t Timestamp) Equal(s Timestamp) bool {
 	return t.WallTime == s.WallTime && t.Logical == s.Logical

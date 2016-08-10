@@ -59,7 +59,6 @@ func ECSIterPrev(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 }
 
 func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
-	debug := false
 	newKey := make([]byte, len(SK.Key))
 	newTimestamp := SK.Timestamp
 	copy(newKey, SK.Key)
@@ -76,7 +75,7 @@ func ECSIterNext(SK MVCCKey, skip_current_key_versions bool) ECSIterState {
 		Key 			: newKey,
 		Timestamp	: newTimestamp,
 	}
-	return ECSIterSeek(newSK, false, debug, false)
+	return ECSIterSeek(newSK, false, false)
 }
 
 func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
@@ -85,11 +84,7 @@ func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 	}
 	for e := keyList.Back(); e != nil; e = e.Prev() {
 		key := e.Value.(MVCCKey)
-		if (prefix || SK.IsValue()) && !key.IsValue() {
-			// It is observed that when prefix is true in the cockroach iterator or when search key
-			// has timestamp, key without timestamp is not where iterator seeks to. Though I have not
-			// read this anywhere in documentation. -Arjun
-			// CHECK IF THIS RULE APPLICABLE IN REVERSE,NEXT,PREV AS WELL!! CANNOT, AS SEEKREVERSE DONT EVER EXECUTE !!
+		if prefix && !key.IsValue() {
 			continue
 		}
 		var c int
@@ -119,26 +114,19 @@ func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 			if key.Key.Compare(oldkey.Key) != 0 {
 				break
 			}
-			if keyChanged {
+			savedTimestamp := key.Timestamp
+			if key.Timestamp == hlc.ZeroTimestamp {
+				key.Timestamp = hlc.MaxTimestamp
+			}
+			if effectiveSKTS.Less(key.Timestamp) || effectiveSKTS.Equal(key.Timestamp) {
 				currDiff = hlc.Timestamp{
-					WallTime  :  key.Timestamp.WallTime - effectiveSKTS.WallTime,
-					Logical   :  key.Timestamp.Logical - effectiveSKTS.Logical,
+					WallTime  : key.Timestamp.WallTime - effectiveSKTS.WallTime,
+					Logical   : key.Timestamp.Logical - effectiveSKTS.Logical,
 				}
 				if currDiff.Less(maxDiffTS) {
-					//we want min diff, lowest timestamp key
 					maxDiffTS = currDiff
 					oldkey = key
-				}
-			} else {
-				if effectiveSKTS.Less(key.Timestamp) || effectiveSKTS.Equal(key.Timestamp) {
-					currDiff = hlc.Timestamp{
-						WallTime  : key.Timestamp.WallTime - effectiveSKTS.WallTime,
-						Logical   : key.Timestamp.Logical - effectiveSKTS.Logical,
-					}
-					if currDiff.Less(maxDiffTS) {
-						maxDiffTS = currDiff
-						oldkey = key
-					}
+					oldkey.Timestamp = savedTimestamp
 				}
 			}
 		}
@@ -156,65 +144,35 @@ func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 // SK 		- key being seeked
 // prefix - when prefix is true, only keys with SK.key as a prefix are searched in ECS
 // debug	- this is just for debugging purpose, can be safely removed
-func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterState {
+func ECSIterSeek(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 	if reGetList {
 		getList(goToECSKey(SK), prefix)
 	}
-	if debug {
-		fmt.Println("seeked", SK)
-	}
 	for e := keyList.Front(); e != nil; e = e.Next() {
 		key := e.Value.(MVCCKey)
-		if (prefix || SK.IsValue()) && !key.IsValue() {		// It is observed that when prefix is true in the cockroach iterator or when search key
-																											// has timestamp, key without timestamp is not where iterator seeks to. Though I have not
+		if prefix && !key.IsValue() {		// It is observed that when prefix is true in the cockroach iterator,
+																											// key without timestamp is not where iterator seeks to. Though I have not
 																											// read this anywhere in documentation. -Arjun
 																											// Update : Need to understand more about intents
 			continue
-		}
-		if debug {
-			fmt.Println("comparing", SK, "to", key)
 		}
 		var c int
 		if c = SK.Key.Compare(key.Key); c > 0 {
 			continue
 		}
 		var keyChanged bool
-		if c==0 {
+		if c == 0 {
 			keyChanged = false
-			if debug {
-				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
-			}
 		} else {
 			keyChanged = true
-			if debug {
-				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
-			}
-		}
-		if false && !keyChanged {
-			if !key.IsValue() {
-				//if debug {
-					fmt.Println("returning through new protocol", key)
-				//}
-				return ECSIterState{
-					key:		key,
-					valid:	true,
-				}
-			}
 		}
 		var effectiveSKTS hlc.Timestamp
 		if keyChanged {
-			effectiveSKTS = hlc.MaxTimestamp
+			effectiveSKTS = hlc.ZeroTimestamp
 		} else {
 			effectiveSKTS = SK.Timestamp
-			if SK.Timestamp==hlc.ZeroTimestamp {
-				effectiveSKTS = hlc.MaxTimestamp
-			}
 		}
 		oldkey := MVCCKey{Key:key.Key, Timestamp:key.Timestamp}
-		if debug {
-			fmt.Println("key set to", oldkey)
-		}
-		minDiffTS := hlc.ZeroTimestamp
 		maxDiffTS := hlc.MaxTimestamp
 		var currDiff hlc.Timestamp
 		for ; e != nil; e = e.Next() {
@@ -222,50 +180,13 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterSta
 			if key.Key.Compare(oldkey.Key) != 0 {
 				break
 			}
-			savedTimestamp := key.Timestamp
-			if key.Timestamp==hlc.ZeroTimestamp {
-				key.Timestamp = hlc.MaxTimestamp
-			}
-			if debug {
-				fmt.Println("comparing with", key)
-			}
-			if false && keyChanged {
-				if debug {
-					fmt.Println("considering1", key, SK.Timestamp.WallTime)
-				}
-				currDiff = hlc.Timestamp {
-					WallTime	:	key.Timestamp.WallTime - effectiveSKTS.WallTime,
-					Logical		:	key.Timestamp.Logical - effectiveSKTS.Logical,
-				}
-				if !currDiff.Less(minDiffTS) {	//we want max diff, biggest timestamp key
-					minDiffTS = currDiff
-					oldkey = key
-					if debug {
-						fmt.Println("accepted for now1", key)
+			if key.Timestamp.EffectiveLess(effectiveSKTS) || effectiveSKTS.Equal(key.Timestamp){
+				currDiff = effectiveSKTS.Minus(key.Timestamp)
+					if currDiff.Less(maxDiffTS) {
+						maxDiffTS = currDiff
+						oldkey = key
 					}
 				}
-			} else {
-				if key.Timestamp.Less(effectiveSKTS) || effectiveSKTS.Equal(key.Timestamp){
-						if debug {
-							fmt.Println("considering2", key, SK.Timestamp.WallTime)
-						}
-						currDiff = hlc.Timestamp {
-							WallTime	:	effectiveSKTS.WallTime-key.Timestamp.WallTime,
-							Logical		:	effectiveSKTS.Logical-key.Timestamp.Logical,
-						}
-						if currDiff.Less(maxDiffTS) {
-							maxDiffTS = currDiff
-							oldkey = key
-							oldkey.Timestamp = savedTimestamp
-							if debug {
-								fmt.Println("accepted for now2", key)
-							}
-						}
-					}
-			}
-		}
-		if debug {
-			fmt.Println("returning", oldkey)
 		}
 		return ECSIterState{
 			key:		oldkey,

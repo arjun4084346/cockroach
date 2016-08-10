@@ -37,6 +37,7 @@ func (t Timestamp) Less(s Timestamp) bool {
 	return t.WallTime < s.WallTime || (t.WallTime == s.WallTime && t.Logical < s.Logical)
 }
 
+//Returns true if t is less than s, keeping in mind that zero timestamp (intent) is always on top
 func (t Timestamp) EffectiveLess(s Timestamp) bool {
 	if t == ZeroTimestamp {
 		return false
@@ -47,6 +48,7 @@ func (t Timestamp) EffectiveLess(s Timestamp) bool {
 	return t.WallTime < s.WallTime || (t.WallTime == s.WallTime && t.Logical < s.Logical)
 }
 
+//Returns the diff of t and s
 func (t Timestamp) Minus(s Timestamp) Timestamp {
 	if t == ZeroTimestamp {
 		t = MaxTimestamp

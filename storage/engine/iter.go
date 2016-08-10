@@ -87,52 +87,39 @@ func ECSIterSeekReverse(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 		if prefix && !key.IsValue() {
 			continue
 		}
-		var c int
-		if c = SK.Key.Compare(key.Key); c < 0 {
+		var keyChanged int
+		if keyChanged = SK.Key.Compare(key.Key); keyChanged < 0 {
 			continue
 		}
-		var keyChanged bool
-		if c == 0 {
-			keyChanged = false
-		} else {
-			keyChanged = true
-		}
 		var effectiveSKTS hlc.Timestamp
-		if keyChanged {
-			effectiveSKTS = hlc.ZeroTimestamp
-		} else {
+		if keyChanged == 0 {
 			effectiveSKTS = SK.Timestamp
-			if SK.Timestamp == hlc.ZeroTimestamp {
-				effectiveSKTS = hlc.MaxTimestamp
-			}
+		} else {
+			effectiveSKTS = hlc.ZeroTimestamp
 		}
 		oldkey := MVCCKey{Key:key.Key, Timestamp:key.Timestamp}
 		maxDiffTS := hlc.MaxTimestamp
 		var currDiff hlc.Timestamp
+		found := false
 		for ; e != nil; e = e.Prev() {
 			key = e.Value.(MVCCKey)
 			if key.Key.Compare(oldkey.Key) != 0 {
 				break
 			}
-			savedTimestamp := key.Timestamp
-			if key.Timestamp == hlc.ZeroTimestamp {
-				key.Timestamp = hlc.MaxTimestamp
-			}
-			if effectiveSKTS.Less(key.Timestamp) || effectiveSKTS.Equal(key.Timestamp) {
-				currDiff = hlc.Timestamp{
-					WallTime  : key.Timestamp.WallTime - effectiveSKTS.WallTime,
-					Logical   : key.Timestamp.Logical - effectiveSKTS.Logical,
-				}
+			if effectiveSKTS.EffectiveLess(key.Timestamp) || effectiveSKTS.Equal(key.Timestamp) {
+				currDiff = key.Timestamp.Minus(effectiveSKTS)
 				if currDiff.Less(maxDiffTS) {
 					maxDiffTS = currDiff
 					oldkey = key
-					oldkey.Timestamp = savedTimestamp
+					found = true
 				}
 			}
 		}
-		return ECSIterState{
-			key:    oldkey,
-			valid:  true,
+		if found || keyChanged > 0 {
+			return ECSIterState{
+				key:		oldkey,
+				valid:	true,
+			}
 		}
 	}
 	return ECSIterState{
@@ -156,25 +143,20 @@ func ECSIterSeek(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 																											// Update : Need to understand more about intents
 			continue
 		}
-		var c int
-		if c = SK.Key.Compare(key.Key); c > 0 {
+		var keyChanged int		// keyChanged < 0 means we have reached to next key while seek
+		if keyChanged = SK.Key.Compare(key.Key); keyChanged > 0 {
 			continue
 		}
-		var keyChanged bool
-		if c == 0 {
-			keyChanged = false
-		} else {
-			keyChanged = true
-		}
 		var effectiveSKTS hlc.Timestamp
-		if keyChanged {
-			effectiveSKTS = hlc.ZeroTimestamp
-		} else {
+		if keyChanged == 0 {
 			effectiveSKTS = SK.Timestamp
+		} else {
+			effectiveSKTS = hlc.ZeroTimestamp
 		}
 		oldkey := MVCCKey{Key:key.Key, Timestamp:key.Timestamp}
 		maxDiffTS := hlc.MaxTimestamp
 		var currDiff hlc.Timestamp
+		found := false
 		for ; e != nil; e = e.Next() {
 			key = e.Value.(MVCCKey)
 			if key.Key.Compare(oldkey.Key) != 0 {
@@ -185,12 +167,15 @@ func ECSIterSeek(SK MVCCKey, prefix bool, reGetList bool) ECSIterState {
 					if currDiff.Less(maxDiffTS) {
 						maxDiffTS = currDiff
 						oldkey = key
+						found = true
 					}
 				}
 		}
-		return ECSIterState{
-			key:		oldkey,
-			valid:	true,
+		if found || keyChanged < 0 {		// next key is always > the seek key
+			return ECSIterState{
+				key:		oldkey,
+				valid:	true,
+			}
 		}
 	}
 	return ECSIterState{

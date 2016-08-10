@@ -206,4 +206,7 @@ func (b *rocksDBBatchBuilder) Clear(key MVCCKey) {
 	pos := len(b.repr)
 	b.encodeKey(key, 0)
 	b.repr[pos] = batchTypeDeletion
+	if qualifiedKey(key.String()) {
+		_ = deleteObject(goToECSKey(key), key)
+	}
 }

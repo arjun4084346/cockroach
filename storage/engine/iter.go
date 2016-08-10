@@ -168,6 +168,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterSta
 		if (prefix || SK.IsValue()) && !key.IsValue() {		// It is observed that when prefix is true in the cockroach iterator or when search key
 																											// has timestamp, key without timestamp is not where iterator seeks to. Though I have not
 																											// read this anywhere in documentation. -Arjun
+																											// Update : Need to understand more about intents
 			continue
 		}
 		if debug {
@@ -189,11 +190,11 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterSta
 				fmt.Printf("keyChanged is %v now, SK was %s, while key caused this is %s\n", keyChanged, SK, key)
 			}
 		}
-		if false && keyChanged {
+		if false && !keyChanged {
 			if !key.IsValue() {
-				if debug {
+				//if debug {
 					fmt.Println("returning through new protocol", key)
-				}
+				//}
 				return ECSIterState{
 					key:		key,
 					valid:	true,
@@ -202,7 +203,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterSta
 		}
 		var effectiveSKTS hlc.Timestamp
 		if keyChanged {
-			effectiveSKTS = hlc.ZeroTimestamp
+			effectiveSKTS = hlc.MaxTimestamp
 		} else {
 			effectiveSKTS = SK.Timestamp
 			if SK.Timestamp==hlc.ZeroTimestamp {
@@ -221,10 +222,14 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterSta
 			if key.Key.Compare(oldkey.Key) != 0 {
 				break
 			}
+			savedTimestamp := key.Timestamp
+			if key.Timestamp==hlc.ZeroTimestamp {
+				key.Timestamp = hlc.MaxTimestamp
+			}
 			if debug {
 				fmt.Println("comparing with", key)
 			}
-			if keyChanged {
+			if false && keyChanged {
 				if debug {
 					fmt.Println("considering1", key, SK.Timestamp.WallTime)
 				}
@@ -251,6 +256,7 @@ func ECSIterSeek(SK MVCCKey, prefix bool, debug bool, reGetList bool) ECSIterSta
 						if currDiff.Less(maxDiffTS) {
 							maxDiffTS = currDiff
 							oldkey = key
+							oldkey.Timestamp = savedTimestamp
 							if debug {
 								fmt.Println("accepted for now2", key)
 							}

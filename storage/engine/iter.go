@@ -30,7 +30,6 @@ import (
 // keyList holds list of keys fetched from the ECS in lexicographic order
 // keyListCommonKey holds list of keys with common user-key in lexicographic order
 var keyList = list.New()
-var keyListCommonKey = list.New()
 
 // state of ECS Iterator, valid is true when it holds a valid key
 type ECSIterState struct {
